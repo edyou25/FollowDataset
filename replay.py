@@ -5,11 +5,12 @@ Dataset Replay - Playback and manage recorded trajectories
 Controls:
     UP/DOWN    Select episode
     ENTER      Load selected episode
-    DELETE/D   Delete selected episode
+    BACKSPACE  Delete selected episode
     SPACE      Play/Pause
     LEFT/RIGHT Step backward/forward (when paused)
     R          Restart from beginning
     +/-        Speed up/down
+    WASD       Pan camera
     Scroll     Zoom in/out
     ESC        Exit / Back
 """
@@ -134,7 +135,7 @@ class DatasetReplay:
                     elif event.key == pygame.K_RETURN:
                         if self.episodes:
                             self._load_episode(self.episodes[self.selected_idx])
-                    elif event.key == pygame.K_DELETE or event.key == pygame.K_d:
+                    elif event.key == pygame.K_DELETE or event.key == pygame.K_BACKSPACE:
                         if self.episodes:
                             self.confirm_delete = True
                             self.delete_target = self.episodes[self.selected_idx]
@@ -166,25 +167,25 @@ class DatasetReplay:
                         self.playback_speed = max(0.25, self.playback_speed / 1.5)
                         print(f"Speed: {self.playback_speed:.1f}x")
                     
-                    elif event.key == pygame.K_DELETE or event.key == pygame.K_d:
+                    elif event.key == pygame.K_DELETE or event.key == pygame.K_BACKSPACE:
                         # Delete current episode
                         if self.current_episode:
                             self.confirm_delete = True
                             self.delete_target = self.current_episode
                             print(f"Delete '{self.delete_target}'? Press Y to confirm, N to cancel")
         
-        # Arrow keys for camera pan (when not in selection)
+        # WASD for camera pan (when not in selection)
         if not self.in_selection and not self.confirm_delete:
             keys = pygame.key.get_pressed()
             pan_speed = 0.5
             if keys[pygame.K_w]:
                 self.visualizer.camera_offset[1] += pan_speed
-            if keys[pygame.K_s] and not keys[pygame.K_LCTRL]:
+            if keys[pygame.K_s]:
                 self.visualizer.camera_offset[1] -= pan_speed
             if keys[pygame.K_a]:
                 self.visualizer.camera_offset[0] -= pan_speed
-            if keys[pygame.K_d] and not self.confirm_delete:
-                pass  # D is used for delete, use only A for left pan
+            if keys[pygame.K_d]:
+                self.visualizer.camera_offset[0] += pan_speed
     
     def _update(self, dt: float):
         """Update playback state"""
@@ -286,10 +287,11 @@ class DatasetReplay:
             self.visualizer.screen.blit(hint_text, (dialog_x + dialog_w // 2 - 130, dialog_y + 100))
         
         # Controls hint
-        hints = "UP/DOWN: Select  |  ENTER: Load  |  D/DEL: Delete  |  ESC: Exit"
+        hints = "UP/DOWN: Select  |  ENTER: Load  |  BACKSPACE: Delete  |  ESC: Exit"
         hint_surface = self.visualizer.font.render(hints, True, (100, 100, 100))
-        self.visualizer.screen.blit(hint_surface, (self.visualizer.width // 2 - 220, self.visualizer.height - 40))
+        self.visualizer.screen.blit(hint_surface, (self.visualizer.width // 2 - 230, self.visualizer.height - 40))
         
+        # Single flip at the end
         pygame.display.flip()
     
     def _render_playback(self):
@@ -337,7 +339,7 @@ class DatasetReplay:
             'scores': scores,
         }
         
-        # Render
+        # Render (no flip, we'll flip after overlay)
         self.visualizer.render(
             robot_pos=robot_pos,
             robot_heading=heading,
@@ -348,18 +350,22 @@ class DatasetReplay:
             start_pos=start_pos,
             end_pos=end_pos,
             leash_tension=leash_tension,
-            info=info
+            info=info,
+            flip=False
         )
         
-        # Playback overlay
-        self._draw_playback_ui()
+        # Playback overlay (no flip inside)
+        self._draw_playback_overlay()
         
         # Delete confirmation overlay
         if self.confirm_delete:
-            self._draw_delete_confirmation()
+            self._draw_delete_dialog()
+        
+        # Single flip at the end
+        pygame.display.flip()
     
-    def _draw_delete_confirmation(self):
-        """Draw delete confirmation dialog"""
+    def _draw_delete_dialog(self):
+        """Draw delete confirmation dialog (no flip)"""
         # Dim background
         overlay = pygame.Surface((self.visualizer.width, self.visualizer.height))
         overlay.fill((0, 0, 0))
@@ -385,11 +391,9 @@ class DatasetReplay:
         
         hint_text = self.visualizer.font.render("Press Y to confirm, N to cancel", True, (150, 150, 150))
         self.visualizer.screen.blit(hint_text, (dialog_x + dialog_w // 2 - 130, dialog_y + 100))
-        
-        pygame.display.flip()
     
-    def _draw_playback_ui(self):
-        """Draw playback controls overlay"""
+    def _draw_playback_overlay(self):
+        """Draw playback controls overlay (no flip)"""
         # Progress bar
         bar_width = 400
         bar_height = 8
@@ -440,11 +444,9 @@ class DatasetReplay:
             self.visualizer.screen.blit(ep_surface, (self.visualizer.width // 2 - 80, 15))
         
         # Controls hint
-        hint = "SPACE: Play/Pause | LEFT/RIGHT: Step | R: Restart | +/-: Speed | D: Delete | ESC: Back"
+        hint = "SPACE: Play/Pause | LEFT/RIGHT: Step | R: Restart | +/-: Speed | BACKSPACE: Delete | ESC: Back"
         hint_surface = self.visualizer.font.render(hint, True, (100, 100, 100))
-        self.visualizer.screen.blit(hint_surface, (self.visualizer.width // 2 - 300, self.visualizer.height - 25))
-        
-        pygame.display.flip()
+        self.visualizer.screen.blit(hint_surface, (self.visualizer.width // 2 - 320, self.visualizer.height - 25))
     
     def run(self):
         """Main loop"""

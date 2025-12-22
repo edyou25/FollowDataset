@@ -274,9 +274,10 @@ class Visualizer:
         start_pos: Optional[np.ndarray] = None,
         end_pos: Optional[np.ndarray] = None,
         leash_tension: float = 0.0,
-        info: Optional[dict] = None
+        info: Optional[dict] = None,
+        flip: bool = True
     ):
-        """Render one frame"""
+        """Render one frame. Set flip=False to manually control display update."""
         # Update camera
         self.update_camera(robot_pos)
         
@@ -315,8 +316,9 @@ class Visualizer:
         if info is not None:
             self.draw_ui(info)
         
-        # Update display
-        pygame.display.flip()
+        # Update display (optional)
+        if flip:
+            pygame.display.flip()
     
     def get_events(self) -> list:
         """Get pygame events"""
