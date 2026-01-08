@@ -474,7 +474,10 @@ class DatasetReplay:
 
 def main():
     """Entry point"""
-    replay = DatasetReplay(data_dir="data")
+    # Set data storage path to 'data' folder in the same directory as this script
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    data_dir = os.path.join(script_dir, "data")
+    replay = DatasetReplay(data_dir=data_dir)
     replay.run()
 
 

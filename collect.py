@@ -12,6 +12,7 @@ Controls:
     ESC   Exit
 """
 import sys
+import os
 import numpy as np
 import pygame
 
@@ -30,7 +31,7 @@ class DataCollector:
         path_length: float = 50.0,
         leash_length: float = 1.5,
         robot_speed: float = 2.0,
-        fps: int = 50
+        fps: int = 60
     ):
         self.fps = fps
         self.dt = 1.0 / fps
@@ -44,7 +45,12 @@ class DataCollector:
             dt=self.dt
         )
         self.visualizer = Visualizer()
-        self.storage = DataStorage()
+        
+        # Set data storage path to 'data' folder in the same directory as this script
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        data_dir = os.path.join(script_dir, "data")
+        self.storage = DataStorage(base_dir=data_dir)
+        
         self.scorer = None  # Will be initialized with path
         
         # State

@@ -4,4 +4,4 @@ matplotlib>=3.7.0
 pygame>=2.5.0
 zarr>=2.16.0
 numcodecs>=0.12.0
-
+plotly>=5.18.0
