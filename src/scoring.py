@@ -45,7 +45,7 @@ class TrajectoryScorer:
         self.human_positions.append(human_pos.copy())
         
         # Calculate path deviation
-        deviation = self._get_min_distance_to_path(robot_pos)
+        deviation = self._get_min_distance_to_path(human_pos)
         self.path_deviations.append(deviation)
         
         # Calculate leash tension
