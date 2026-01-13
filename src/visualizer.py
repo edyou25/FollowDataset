@@ -14,6 +14,8 @@ class Visualizer:
         'background': (25, 25, 35),
         'grid': (45, 45, 55),
         'path_ref': (80, 200, 120),      # Reference path - green
+        'path_plan': (220, 200, 80),     # Planned path - yellow
+        'lookahead': (255, 240, 120),    # Lookahead points - bright yellow
         'path_robot': (255, 100, 100),   # Robot trajectory - red
         'path_human': (100, 150, 255),   # Human trajectory - blue
         'robot': (255, 180, 50),         # Robot - orange
@@ -27,7 +29,7 @@ class Visualizer:
     
     # Zoom settings
     MIN_PPM = 3.0    # Minimum pixels per meter
-    MAX_PPM = 50.0   # Maximum pixels per meter
+    MAX_PPM = 200.0   # Maximum pixels per meter
     ZOOM_STEP = 1.2  # Zoom multiplier per scroll
     
     def __init__(
@@ -102,6 +104,15 @@ class Visualizer:
         
         points = [self.world_to_screen(p) for p in path]
         pygame.draw.lines(self.screen, color, False, points, width)
+
+    def draw_points(self, points: np.ndarray, color: tuple, radius: int = 5):
+        """Draw a set of points."""
+        if points is None or len(points) == 0:
+            return
+        for point in points:
+            screen_pos = self.world_to_screen(point)
+            pygame.draw.circle(self.screen, color, screen_pos, radius)
+            pygame.draw.circle(self.screen, (255, 255, 255), screen_pos, max(1, radius - 2), 1)
     
     def draw_marker(self, position: np.ndarray, color: tuple, radius: int = 8, label: str = ""):
         """Draw marker point"""
@@ -174,6 +185,9 @@ class Visualizer:
             f"Points: {info.get('num_points', 0)}",
             f"Zoom: {self.ppm:.1f} px/m",
         ]
+        mode = info.get('mode')
+        if mode:
+            texts.append(f"Mode: {mode}")
         
         for text in texts:
             surface = self.font.render(text, True, self.COLORS['text'])
@@ -191,15 +205,17 @@ class Visualizer:
             self._draw_score_panel(scores)
         
         # Control hints
-        controls = [
-            "Arrows: Move",
-            "SPACE: Record",
-            "S: Save",
-            "R: Reset",
-            "N: New Path",
-            "Scroll: Zoom",
-            "ESC: Exit"
-        ]
+        controls = info.get('controls') if info else None
+        if not controls:
+            controls = [
+                "Arrows: Move",
+                "SPACE: Record",
+                "S: Save",
+                "R: Reset",
+                "N: New Path",
+                "Scroll: Zoom",
+                "ESC: Exit",
+            ]
         y = self.height - len(controls) * line_height - 10
         for text in controls:
             surface = self.font.render(text, True, (150, 150, 150))
@@ -271,6 +287,8 @@ class Visualizer:
         reference_path: Optional[np.ndarray] = None,
         robot_trajectory: Optional[np.ndarray] = None,
         human_trajectory: Optional[np.ndarray] = None,
+        planned_path: Optional[np.ndarray] = None,
+        lookahead_points: Optional[np.ndarray] = None,
         start_pos: Optional[np.ndarray] = None,
         end_pos: Optional[np.ndarray] = None,
         leash_tension: float = 0.0,
@@ -290,6 +308,14 @@ class Visualizer:
         # Draw reference path
         if reference_path is not None and len(reference_path) > 0:
             self.draw_path(reference_path, self.COLORS['path_ref'], 3)
+
+        # Draw planned path
+        if planned_path is not None and len(planned_path) > 1:
+            self.draw_path(planned_path, self.COLORS['path_plan'], 2)
+
+        # Draw lookahead points
+        if lookahead_points is not None and len(lookahead_points) > 0:
+            self.draw_points(lookahead_points, self.COLORS['lookahead'], 5)
         
         # Draw trajectories
         if robot_trajectory is not None and len(robot_trajectory) > 1:
