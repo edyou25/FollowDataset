@@ -271,8 +271,8 @@ def main():
     collector = DataCollector(
         path_length=50.0,   # Reference path length 50m
         leash_length=1.5,   # Leash length 1.5m
-        robot_speed=2.0,    # Robot speed 2m/s
-        fps=50              # Frame rate 50FPS
+        robot_speed=1.5,    # Robot speed 1.5m/s (正常步行速度，匹配训练配置)
+        fps=20              # Frame rate 20FPS (降低以增加每步时间，匹配训练配置)
     )
     collector.run()
 

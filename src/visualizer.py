@@ -34,8 +34,8 @@ class Visualizer:
     
     def __init__(
         self,
-        width: int = 1200,
-        height: int = 800,
+        width: int = 1600,  # 从 1200 增加到 1600
+        height: int = 1000,  # 从 800 增加到 1000
         pixels_per_meter: float = 12.0
     ):
         self.width = width
