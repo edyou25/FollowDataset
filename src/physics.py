@@ -41,7 +41,7 @@ class PhysicsEngine:
         self,
         leash_length: float = 1.5,  # 绳子长度（米）
         robot_speed: float = 1.5,   # 机器人移动速度（米/秒）
-        turn_speed: float = 2.0,    # 机器人转向速度（弧度/秒）
+        turn_speed: float = 1.5,    # 机器人转向速度（弧度/秒，降低以匹配较慢的运动）
         human_drag: float = 0.9,    # 人类阻尼系数
         dt: float = 0.02            # 时间步长（秒）
     ):
