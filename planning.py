@@ -69,6 +69,10 @@ class ModelPlanner:
         robot_speed: float = 1.5,
         fps: int = 20,
         inference_steps: int = 8,
+        turn_gain: float = 1.2,
+        curvature_slowdown: bool = True,
+        curvature_scale: float = 0.7,
+        min_speed_scale: float = 0.25,
         log_path: Optional[Path] = None,
         log_interval: int = 1,
     ):
@@ -197,6 +201,11 @@ class ModelPlanner:
         self.cached_control = (0.0, 0.0)
         self.current_action = None
         self.current_delta = None
+        self.turn_gain = float(turn_gain)
+        self.curvature_slowdown = bool(curvature_slowdown)
+        self.curvature_scale = float(curvature_scale)
+        self.min_speed_scale = float(min_speed_scale)
+        self.current_speed_scale = 1.0
         
         # Reduce inference steps for faster performance
         if hasattr(self.policy, 'num_inference_steps'):
@@ -228,6 +237,10 @@ class ModelPlanner:
                     "n_lookahead": int(self.n_lookahead),
                     "lookahead_stride": int(self.lookahead_stride),
                     "inference_interval": int(self.inference_interval),
+                    "turn_gain": float(self.turn_gain),
+                    "curvature_slowdown": bool(self.curvature_slowdown),
+                    "curvature_scale": float(self.curvature_scale),
+                    "min_speed_scale": float(self.min_speed_scale),
                 },
             )
 
@@ -320,6 +333,7 @@ class ModelPlanner:
             "heading": float(robot_state.heading),
             "forward": float(forward),
             "turn": float(turn),
+            "speed_scale": float(self.current_speed_scale),
             "use_policy": bool(self.use_policy),
             "paused": bool(self.paused),
             "scores": scores,
@@ -565,16 +579,28 @@ class ModelPlanner:
                         heading_delta = float(action[1])
                         turn_speed = float(self.physics.turn_speed)
                         robot_speed = float(self.physics.robot_speed)
-                        turn = heading_delta / (turn_speed * self.data_dt) if turn_speed > 0 else 0.0
+                        turn_delta = heading_delta * self.turn_gain
+                        turn = turn_delta / (turn_speed * self.data_dt) if turn_speed > 0 else 0.0
                         forward = forward_delta / (robot_speed * self.data_dt) if robot_speed > 0 else 0.0
+                        speed_scale = 1.0
+                        if self.curvature_slowdown and turn_speed > 0:
+                            max_turn = turn_speed * self.data_dt
+                            if max_turn > 1e-6:
+                                ratio = min(1.0, abs(turn_delta) / max_turn)
+                                speed_scale = max(
+                                    self.min_speed_scale, 1.0 - self.curvature_scale * ratio
+                                )
+                                forward *= speed_scale
                         forward = float(np.clip(forward, -1.0, 1.0))
                         turn = float(np.clip(turn, -1.0, 1.0))
                         delta = self._action_to_delta(action, self.physics.robot.position)
+                        self.current_speed_scale = speed_scale
                     else:
                         delta = self._action_to_delta(action, self.physics.robot.position)
                         forward, turn = self._delta_to_control(
                             delta, self.physics.robot.heading, dt=self.data_dt
                         )
+                        self.current_speed_scale = 1.0
                     self.current_delta = delta
                     self.cached_control = (forward, turn)
                 else:
@@ -591,6 +617,7 @@ class ModelPlanner:
                 self.cached_control = (forward, turn)
                 self.current_action = None
                 self.current_delta = None
+                self.current_speed_scale = 1.0
 
         self.physics.set_control(forward, turn)
         robot_state, human_state = self.physics.step()
@@ -684,7 +711,7 @@ def main():
     
     # Default checkpoint path - use latest available checkpoint
     default_ckpt = Path(
-        "/home/yyf/IROS2026/diffusion_policy/data/outputs/2026.01.14/16.06.36_train_diffusion_unet_lowdim_guide_guide_lowdim/checkpoints/epoch=0240-test_mean_score=0.619.ckpt"
+        "/home/yyf/IROS2026/diffusion_policy/data/outputs/2026.01.15/12.55.28_train_diffusion_unet_lowdim_guide_guide_lowdim/checkpoints/epoch=0240-test_mean_score=0.637.ckpt"
     )
     
     parser.add_argument(
@@ -720,6 +747,29 @@ def main():
     parser.add_argument("--fps", type=int, default=20)
     parser.add_argument("--inference-steps", type=int, default=64,
                         help="Number of diffusion inference steps (lower=faster, default=64)")
+    parser.add_argument(
+        "--turn-gain",
+        type=float,
+        default=1.2,
+        help="Scale heading_delta before converting to turn input.",
+    )
+    parser.add_argument(
+        "--no-curvature-slowdown",
+        action="store_true",
+        help="Disable curvature-based forward slowdown.",
+    )
+    parser.add_argument(
+        "--curvature-scale",
+        type=float,
+        default=0.7,
+        help="Slowdown strength based on heading_delta ratio.",
+    )
+    parser.add_argument(
+        "--min-speed-scale",
+        type=float,
+        default=0.25,
+        help="Lower bound for curvature slowdown.",
+    )
     parser.add_argument(
         "--log-dir",
         type=Path,
@@ -757,6 +807,10 @@ def main():
         robot_speed=args.robot_speed,
         fps=args.fps,
         inference_steps=args.inference_steps,
+        turn_gain=args.turn_gain,
+        curvature_slowdown=not args.no_curvature_slowdown,
+        curvature_scale=args.curvature_scale,
+        min_speed_scale=args.min_speed_scale,
         log_path=None if args.no_log else args.log_dir / f"planning_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl",
         log_interval=args.log_interval,
     )
