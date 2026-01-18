@@ -51,6 +51,52 @@ def compute_timeseries(
     )
 
 
+def build_circle_outlines(obstacles: np.ndarray, steps: int = 32) -> Tuple[List[float], List[float]]:
+    if obstacles is None or len(obstacles) == 0:
+        return [], []
+    angles = np.linspace(0.0, 2.0 * np.pi, steps, endpoint=True)
+    xs: List[float] = []
+    ys: List[float] = []
+    for obs in obstacles:
+        if isinstance(obs, dict):
+            ox = float(obs.get("x", 0.0))
+            oy = float(obs.get("y", 0.0))
+            r = float(obs.get("r", 0.0))
+        else:
+            ox = float(obs[0])
+            oy = float(obs[1])
+            r = float(obs[2])
+        xs.extend((ox + r * np.cos(angles)).tolist())
+        ys.extend((oy + r * np.sin(angles)).tolist())
+        xs.append(None)
+        ys.append(None)
+    return xs, ys
+
+
+def build_segment_lines(segments: np.ndarray) -> Tuple[List[float], List[float]]:
+    if segments is None or len(segments) == 0:
+        return [], []
+    xs: List[float] = []
+    ys: List[float] = []
+    for seg in segments:
+        if isinstance(seg, dict):
+            if "p1" in seg and "p2" in seg:
+                p1 = seg["p1"]
+                p2 = seg["p2"]
+                x1, y1 = float(p1[0]), float(p1[1])
+                x2, y2 = float(p2[0]), float(p2[1])
+            else:
+                x1 = float(seg.get("x1", 0.0))
+                y1 = float(seg.get("y1", 0.0))
+                x2 = float(seg.get("x2", 0.0))
+                y2 = float(seg.get("y2", 0.0))
+        else:
+            x1, y1, x2, y2 = float(seg[0]), float(seg[1]), float(seg[2]), float(seg[3])
+        xs.extend([x1, x2, None])
+        ys.extend([y1, y2, None])
+    return xs, ys
+
+
 def prepare_trace_data(
     data: dict,
     mask: Optional[np.ndarray],
@@ -58,6 +104,8 @@ def prepare_trace_data(
 ) -> Dict[str, object]:
     meta = data["metadata"]
     ref_path = np.array(meta["reference_path"])
+    obstacles = np.array(meta.get("obstacles", []), dtype=np.float32)
+    segment_obstacles = np.array(meta.get("segment_obstacles", []), dtype=np.float32)
     robot_path = data["robot_path"]
     human_path = data["human_path"]
     timestamps = data["timestamps"]
@@ -121,6 +169,14 @@ def prepare_trace_data(
     # 13 indicator
     x_list.append(np.array([timestamps[0], timestamps[0]]))
     y_list.append(np.array([indicator_ymin, indicator_ymax]))
+
+    # 14-15 obstacles
+    obs_x, obs_y = build_circle_outlines(obstacles)
+    seg_x, seg_y = build_segment_lines(segment_obstacles)
+    x_list.append(obs_x)
+    y_list.append(obs_y)
+    x_list.append(seg_x)
+    y_list.append(seg_y)
 
     score_text = ""
     if scores:
@@ -478,6 +534,32 @@ def build_figure(
         secondary_y=False,
     )  # trace 9 (animated)
     indicator_trace_idx = len(fig.data) - 1
+
+    # Obstacles (static)
+    fig.add_trace(
+        go.Scatter(
+            x=x_list[14],
+            y=y_list[14],
+            mode="lines",
+            name="Circle obstacles",
+            line=dict(color="rgba(120,120,140,0.7)", width=2),
+            showlegend=True,
+        ),
+        row=1,
+        col=1,
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=x_list[15],
+            y=y_list[15],
+            mode="lines",
+            name="Segment obstacles",
+            line=dict(color="rgba(160,160,180,0.8)", width=3),
+            showlegend=True,
+        ),
+        row=1,
+        col=1,
+    )
     fig.update_layout(
         meta={
             "trace_indices": {

@@ -49,6 +49,8 @@ class DataStorage:
         reference_path: np.ndarray,
         start_pos: np.ndarray,
         end_pos: np.ndarray,
+        obstacles: Optional[np.ndarray] = None,
+        segment_obstacles: Optional[np.ndarray] = None,
         episode_name: Optional[str] = None,
         extra_metadata: Optional[dict] = None
     ) -> str:
@@ -80,6 +82,8 @@ class DataStorage:
             reference_path=reference_path,
             start_pos=start_pos,
             end_pos=end_pos,
+            obstacles=obstacles,
+            segment_obstacles=segment_obstacles,
             episode_name=episode_name,
             extra_metadata=extra_metadata
         )
@@ -129,6 +133,8 @@ class DataStorage:
         reference_path: np.ndarray,
         start_pos: np.ndarray,
         end_pos: np.ndarray,
+        obstacles: Optional[np.ndarray],
+        segment_obstacles: Optional[np.ndarray],
         episode_name: str,
         extra_metadata: Optional[dict] = None
     ):
@@ -154,6 +160,11 @@ class DataStorage:
             'human_path_length': human_length,
             'reference_path': reference_path.tolist(),
         }
+
+        if obstacles is not None and len(obstacles) > 0:
+            metadata['obstacles'] = np.asarray(obstacles).tolist()
+        if segment_obstacles is not None and len(segment_obstacles) > 0:
+            metadata['segment_obstacles'] = np.asarray(segment_obstacles).tolist()
         
         # Add extra metadata (like scores)
         if extra_metadata:
@@ -240,4 +251,3 @@ if __name__ == "__main__":
     
     # 列出所有episode
     print("Episodes:", DataStorage.list_episodes())
-

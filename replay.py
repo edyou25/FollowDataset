@@ -305,6 +305,8 @@ class DatasetReplay:
         ref_path = np.array(self.current_meta['reference_path'])
         start_pos = np.array(self.current_meta['start_position'])
         end_pos = np.array(self.current_meta['end_position'])
+        obstacles = np.array(self.current_meta.get('obstacles', []), dtype=np.float32)
+        segment_obstacles = np.array(self.current_meta.get('segment_obstacles', []), dtype=np.float32)
         
         # Current positions
         robot_pos = robot_path[self.frame_idx]
@@ -347,6 +349,9 @@ class DatasetReplay:
             reference_path=ref_path,
             robot_trajectory=robot_trajectory,
             human_trajectory=human_trajectory,
+            obstacles=obstacles if len(obstacles) > 0 else None,
+            segment_obstacles=segment_obstacles if len(segment_obstacles) > 0 else None,
+            obstacle_inflation=None,
             start_pos=start_pos,
             end_pos=end_pos,
             leash_tension=leash_tension,
@@ -483,4 +488,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

@@ -129,6 +129,8 @@ class DataCollector:
                 reference_path=self.current_path_data['path'],
                 start_pos=self.current_path_data['start'],
                 end_pos=self.current_path_data['end'],
+                obstacles=self.current_path_data.get('obstacles'),
+                segment_obstacles=self.current_path_data.get('segment_obstacles'),
                 extra_metadata={'scores': scores}
             )
             print(f"✓ Saved! Score: {scores.get('total', 0):.0f}/100 ({scores.get('grade', 'N/A')})")
@@ -193,6 +195,9 @@ class DataCollector:
     def _update(self):
         """Update physics state"""
         robot_state, human_state = self.physics.step()
+
+        if self._check_collision():
+            return self.physics.robot.copy(), self.physics.human.copy()
         
         # Update trajectory cache
         self.robot_trajectory.append(robot_state.position.copy())
@@ -211,6 +216,19 @@ class DataCollector:
                 self.scorer.update(robot_state.position, human_state.position)
         
         return robot_state, human_state
+
+    def _check_collision(self) -> bool:
+        obstacles = self.current_path_data.get('obstacles') if self.current_path_data else None
+        segments = self.current_path_data.get('segment_obstacles') if self.current_path_data else None
+        collided, info = self.physics.check_collision(obstacles, segment_obstacles=segments)
+        if collided:
+            who = info.get("who", "agent")
+            idx = info.get("idx")
+            obs_type = info.get("type", "obstacle")
+            print(f"Collision detected ({who}, {obs_type} {idx}), resetting.")
+            self._reset_position()
+            return True
+        return False
     
     def _render(self, robot_state, human_state, actual_fps: float):
         """Render frame"""
@@ -225,6 +243,8 @@ class DataCollector:
             'num_points': self.storage.get_num_points(),
             'recording': self.recording,
             'scores': scores,
+            'robot_radius': self.physics.robot_radius,
+            'human_radius': self.physics.human_radius,
         }
         
         self.visualizer.render(
@@ -234,6 +254,11 @@ class DataCollector:
             reference_path=self.current_path_data['path'] if self.current_path_data else None,
             robot_trajectory=self.robot_trajectory,
             human_trajectory=self.human_trajectory,
+            obstacles=self.current_path_data.get('obstacles') if self.current_path_data else None,
+            segment_obstacles=self.current_path_data.get('segment_obstacles') if self.current_path_data else None,
+            obstacle_inflation=(self.physics.robot_radius, self.physics.human_radius),
+            robot_radius=self.physics.robot_radius,
+            human_radius=self.physics.human_radius,
             start_pos=self.current_path_data['start'] if self.current_path_data else None,
             end_pos=self.current_path_data['end'] if self.current_path_data else None,
             leash_tension=self.physics.get_leash_tension(),

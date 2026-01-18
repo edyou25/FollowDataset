@@ -140,6 +140,45 @@ class ModelPlanner:
             except Exception:
                 cfg_k_lookahead = None
 
+        cfg_n_lookahead = None
+        try:
+            cfg_n_lookahead = self.workspace.cfg.task.get("n_lookahead")
+        except Exception:
+            cfg_n_lookahead = None
+        if cfg_n_lookahead is None:
+            try:
+                cfg_n_lookahead = self.workspace.cfg.task.dataset.get("n_lookahead")
+            except Exception:
+                cfg_n_lookahead = None
+
+        cfg_n_obstacle_circles = None
+        try:
+            cfg_n_obstacle_circles = self.workspace.cfg.task.get("n_obstacle_circles")
+        except Exception:
+            cfg_n_obstacle_circles = None
+        if cfg_n_obstacle_circles is None:
+            try:
+                cfg_n_obstacle_circles = self.workspace.cfg.task.dataset.get("n_obstacle_circles")
+            except Exception:
+                cfg_n_obstacle_circles = None
+
+        cfg_n_obstacle_segments = None
+        try:
+            cfg_n_obstacle_segments = self.workspace.cfg.task.get("n_obstacle_segments")
+        except Exception:
+            cfg_n_obstacle_segments = None
+        if cfg_n_obstacle_segments is None:
+            try:
+                cfg_n_obstacle_segments = self.workspace.cfg.task.dataset.get("n_obstacle_segments")
+            except Exception:
+                cfg_n_obstacle_segments = None
+
+        cfg_obstacle_include_radius = None
+        try:
+            cfg_obstacle_include_radius = self.workspace.cfg.task.dataset.get("obstacle_include_radius")
+        except Exception:
+            cfg_obstacle_include_radius = None
+
         cfg_frame_stride = None
         try:
             cfg_frame_stride = self.workspace.cfg.task.get("frame_stride")
@@ -155,10 +194,37 @@ class ModelPlanner:
         self.action_dim = int(self.policy.action_dim)
         self.n_obs_steps = int(self.policy.n_obs_steps)
         self.n_action_steps = int(self.policy.n_action_steps)
-        extra_obs = self.obs_dim - 4
-        if extra_obs < 0 or extra_obs % 2 != 0:
-            raise ValueError(f"Unsupported obs_dim={self.obs_dim}, expected 4 + 2*N")
-        self.n_lookahead = extra_obs // 2
+        self.n_obstacle_circles = max(0, int(cfg_n_obstacle_circles or 0))
+        self.n_obstacle_segments = max(0, int(cfg_n_obstacle_segments or 0))
+        self.obstacle_include_radius = (
+            True if cfg_obstacle_include_radius is None else bool(cfg_obstacle_include_radius)
+        )
+        circle_dim = 3 if self.obstacle_include_radius else 2
+        self.obstacle_obs_dim = (
+            self.n_obstacle_circles * circle_dim + self.n_obstacle_segments * 4
+        )
+        if cfg_n_lookahead is None:
+            extra_obs = self.obs_dim - 4 - self.obstacle_obs_dim
+            if extra_obs < 0 or extra_obs % 2 != 0:
+                raise ValueError(
+                    f"Unsupported obs_dim={self.obs_dim}, expected 4 + 2*N + {self.obstacle_obs_dim}"
+                )
+            self.n_lookahead = extra_obs // 2
+        else:
+            self.n_lookahead = int(cfg_n_lookahead)
+            expected_obs_dim = 4 + 2 * self.n_lookahead + self.obstacle_obs_dim
+            if self.obs_dim != expected_obs_dim:
+                extra_obs = self.obs_dim - 4 - self.obstacle_obs_dim
+                if extra_obs >= 0 and extra_obs % 2 == 0:
+                    self.n_lookahead = extra_obs // 2
+                    print(
+                        f"[warn] obs_dim mismatch (expected {expected_obs_dim}, got {self.obs_dim}); "
+                        f"using derived n_lookahead={self.n_lookahead}"
+                    )
+                else:
+                    raise ValueError(
+                        f"Unsupported obs_dim={self.obs_dim}, expected {expected_obs_dim}"
+                    )
         stride = k_lookahead if k_lookahead is not None else cfg_k_lookahead
         if stride is None:
             stride = 5
@@ -236,6 +302,10 @@ class ModelPlanner:
                     "robot_state": self.robot_state,
                     "n_lookahead": int(self.n_lookahead),
                     "lookahead_stride": int(self.lookahead_stride),
+                    "n_obstacle_circles": int(self.n_obstacle_circles),
+                    "n_obstacle_segments": int(self.n_obstacle_segments),
+                    "obstacle_obs_dim": int(self.obstacle_obs_dim),
+                    "obstacle_include_radius": bool(self.obstacle_include_radius),
                     "inference_interval": int(self.inference_interval),
                     "turn_gain": float(self.turn_gain),
                     "curvature_slowdown": bool(self.curvature_slowdown),
@@ -250,7 +320,18 @@ class ModelPlanner:
         """Generate new reference path."""
         self.current_path_data = self.path_generator.generate()
         self._reset_position()
-        self._log_event("new_path", {"path_length": float(self.current_path_data["length"])})
+        obstacles = self.current_path_data.get("obstacles")
+        obstacle_count = int(len(obstacles)) if obstacles is not None else 0
+        segments = self.current_path_data.get("segment_obstacles")
+        segment_count = int(len(segments)) if segments is not None else 0
+        self._log_event(
+            "new_path",
+            {
+                "path_length": float(self.current_path_data["length"]),
+                "obstacle_count": obstacle_count,
+                "segment_obstacle_count": segment_count,
+            },
+        )
         print(f"New path generated: length={self.current_path_data['length']:.1f}m")
 
     def _reset_position(self):
@@ -429,11 +510,15 @@ class ModelPlanner:
         else:
             base = np.concatenate([robot_pos, human_pos], axis=0).astype(np.float32)
 
+        ref_features = (
+            self._build_reference_features(robot_pos, heading)
+            if self.n_lookahead > 0 and self.current_path_data is not None
+            else np.zeros((self.n_lookahead * 2,), dtype=np.float32)
+        )
+        obstacle_features = self._build_obstacle_features(robot_pos, heading)
         if self.n_lookahead <= 0 or self.current_path_data is None:
             self.lookahead_world = None
-            return base
-        ref_features = self._build_reference_features(robot_pos, heading)
-        return np.concatenate([base, ref_features], axis=0).astype(np.float32)
+        return np.concatenate([base, ref_features, obstacle_features], axis=0).astype(np.float32)
 
     def _build_reference_features(self, robot_pos: np.ndarray, heading: float) -> np.ndarray:
         ref_path = self.current_path_data["path"]
@@ -452,6 +537,93 @@ class ModelPlanner:
         local_x = cos_h * rel[:, 0] + sin_h * rel[:, 1]
         local_y = -sin_h * rel[:, 0] + cos_h * rel[:, 1]
         return np.stack([local_x, local_y], axis=-1).reshape(-1).astype(np.float32)
+
+    def _build_obstacle_features(self, robot_pos: np.ndarray, heading: float) -> np.ndarray:
+        circle_dim = 3 if self.obstacle_include_radius else 2
+        total_dim = self.n_obstacle_circles * circle_dim + self.n_obstacle_segments * 4
+        if total_dim == 0:
+            return np.zeros((0,), dtype=np.float32)
+
+        feats = np.zeros((total_dim,), dtype=np.float32)
+        offset = 0
+        if self.current_path_data is None:
+            return feats
+
+        obstacles = self.current_path_data.get("obstacles")
+        segments = self.current_path_data.get("segment_obstacles")
+
+        if self.n_obstacle_circles > 0:
+            if obstacles is not None and len(obstacles) > 0:
+                circle_obs = np.asarray(obstacles, dtype=np.float32)
+                if circle_obs.ndim == 2 and circle_obs.shape[1] >= 3:
+                    centers = circle_obs[:, :2]
+                    radii = circle_obs[:, 2]
+                    rel = centers - robot_pos
+                    dist_sq = np.sum(rel * rel, axis=1)
+                    order = np.argsort(dist_sq)
+                    count = min(self.n_obstacle_circles, len(order))
+                    for i in range(self.n_obstacle_circles):
+                        if i < count:
+                            rel_i = rel[order[i]]
+                            if self.robot_frame:
+                                rel_i = self._rotate_rel(rel_i, heading)
+                            feats[offset : offset + 2] = rel_i
+                            if self.obstacle_include_radius:
+                                feats[offset + 2] = radii[order[i]]
+                        offset += circle_dim
+                else:
+                    offset += self.n_obstacle_circles * circle_dim
+            else:
+                offset += self.n_obstacle_circles * circle_dim
+
+        if self.n_obstacle_segments > 0:
+            if segments is not None and len(segments) > 0:
+                seg_obs = np.asarray(segments, dtype=np.float32)
+                if seg_obs.ndim == 2 and seg_obs.shape[1] >= 4:
+                    seg_obs = seg_obs[:, :4]
+                    dist_sq = np.zeros((len(seg_obs),), dtype=np.float32)
+                    for i, seg in enumerate(seg_obs):
+                        p1 = seg[:2]
+                        p2 = seg[2:4]
+                        dist_sq[i] = self._point_segment_dist_sq(robot_pos, p1, p2)
+                    order = np.argsort(dist_sq)
+                    count = min(self.n_obstacle_segments, len(order))
+                    for i in range(self.n_obstacle_segments):
+                        if i < count:
+                            seg = seg_obs[order[i]]
+                            p1 = seg[:2] - robot_pos
+                            p2 = seg[2:4] - robot_pos
+                            if self.robot_frame:
+                                p1 = self._rotate_rel(p1, heading)
+                                p2 = self._rotate_rel(p2, heading)
+                            feats[offset : offset + 4] = [p1[0], p1[1], p2[0], p2[1]]
+                        offset += 4
+                else:
+                    offset += self.n_obstacle_segments * 4
+            else:
+                offset += self.n_obstacle_segments * 4
+
+        return feats
+
+    def _rotate_rel(self, rel: np.ndarray, heading: float) -> np.ndarray:
+        cos_h = float(np.cos(heading))
+        sin_h = float(np.sin(heading))
+        return np.array(
+            [cos_h * rel[0] + sin_h * rel[1], -sin_h * rel[0] + cos_h * rel[1]],
+            dtype=np.float32,
+        )
+
+    def _point_segment_dist_sq(self, point: np.ndarray, p1: np.ndarray, p2: np.ndarray) -> float:
+        ab = p2 - p1
+        denom = float(np.dot(ab, ab))
+        if denom < 1e-12:
+            diff = point - p1
+            return float(np.dot(diff, diff))
+        t = float(np.dot(point - p1, ab)) / denom
+        t = float(np.clip(t, 0.0, 1.0))
+        closest = p1 + t * ab
+        diff = point - closest
+        return float(np.dot(diff, diff))
 
     def _actions_to_path(self, robot_pos: np.ndarray, action_seq: np.ndarray) -> Optional[np.ndarray]:
         if action_seq.size == 0:
@@ -622,6 +794,9 @@ class ModelPlanner:
         self.physics.set_control(forward, turn)
         robot_state, human_state = self.physics.step()
 
+        if self._check_collision():
+            return self.physics.robot.copy(), self.physics.human.copy()
+
         self.robot_trajectory.append(robot_state.position.copy())
         self.human_trajectory.append(human_state.position.copy())
 
@@ -645,6 +820,32 @@ class ModelPlanner:
         self.frame_count += 1
         return robot_state, human_state
 
+    def _check_collision(self) -> bool:
+        obstacles = self.current_path_data.get("obstacles") if self.current_path_data else None
+        segments = self.current_path_data.get("segment_obstacles") if self.current_path_data else None
+        collided, info = self.physics.check_collision(obstacles, segment_obstacles=segments)
+        if collided:
+            who = info.get("who", "agent") if info else "agent"
+            idx = info.get("idx") if info else None
+            obstacle = info.get("obstacle") if info else None
+            obs_type = info.get("type") if info else None
+            self._log_event(
+                "collision",
+                {
+                    "who": who,
+                    "obstacle_type": obs_type,
+                    "obstacle_idx": idx,
+                    "obstacle": obstacle,
+                    "robot_pos": self.physics.robot.position.tolist(),
+                    "human_pos": self.physics.human.position.tolist(),
+                },
+            )
+            label = obs_type or "obstacle"
+            print(f"Collision detected ({who}, {label} {idx}), resetting.")
+            self._reset_position()
+            return True
+        return False
+
     def _render(self, robot_state, human_state, actual_fps: float):
         scores = self.scorer.get_scores() if self.scorer else {}
         mode = "policy" if self.use_policy else "manual"
@@ -660,6 +861,8 @@ class ModelPlanner:
             "recording": False,
             "scores": scores,
             "mode": mode,
+            "robot_radius": self.physics.robot_radius,
+            "human_radius": self.physics.human_radius,
             "controls": [
                 "P: Policy/Manual",
                 "SPACE: Pause",
@@ -680,6 +883,11 @@ class ModelPlanner:
             human_trajectory=self.human_trajectory,
             planned_path=self.planned_path,
             lookahead_points=self.lookahead_world,
+            obstacles=self.current_path_data.get("obstacles") if self.current_path_data else None,
+            segment_obstacles=self.current_path_data.get("segment_obstacles") if self.current_path_data else None,
+            obstacle_inflation=(self.physics.robot_radius, self.physics.human_radius),
+            robot_radius=self.physics.robot_radius,
+            human_radius=self.physics.human_radius,
             start_pos=self.current_path_data["start"] if self.current_path_data else None,
             end_pos=self.current_path_data["end"] if self.current_path_data else None,
             leash_tension=self.physics.get_leash_tension(),

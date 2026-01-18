@@ -43,13 +43,17 @@ class PhysicsEngine:
         robot_speed: float = 1.5,   # 机器人移动速度（米/秒）
         turn_speed: float = 1.5,    # 机器人转向速度（弧度/秒，降低以匹配较慢的运动）
         human_drag: float = 0.9,    # 人类阻尼系数
-        dt: float = 0.02            # 时间步长（秒）
+        dt: float = 0.02,           # 时间步长（秒）
+        robot_radius: float = 0.3,  # 机器人半径（米）
+        human_radius: float = 0.3   # 人半径（米）
     ):
         self.leash_length = leash_length
         self.robot_speed = robot_speed
         self.turn_speed = turn_speed
         self.human_drag = human_drag
         self.dt = dt
+        self.robot_radius = robot_radius
+        self.human_radius = human_radius
         
         # 状态
         self.robot = RobotState()
@@ -152,6 +156,96 @@ class PhysicsEngine:
         distance = np.linalg.norm(self.human.position - self.robot.position)
         return np.clip(distance / self.leash_length, 0, 1)
 
+    def check_collision(
+        self,
+        obstacles,
+        segment_obstacles=None,
+        robot_radius: Optional[float] = None,
+        human_radius: Optional[float] = None,
+    ):
+        """Check collision between robot/human and obstacles."""
+        if (obstacles is None or len(obstacles) == 0) and (segment_obstacles is None or len(segment_obstacles) == 0):
+            return False, None
+
+        robot_radius = self.robot_radius if robot_radius is None else robot_radius
+        human_radius = self.human_radius if human_radius is None else human_radius
+
+        robot_pos = self.robot.position
+        human_pos = self.human.position
+
+        if obstacles is not None and len(obstacles) > 0:
+            for idx, obs in enumerate(obstacles):
+                if isinstance(obs, dict):
+                    ox = float(obs.get("x", 0.0))
+                    oy = float(obs.get("y", 0.0))
+                    radius = float(obs.get("r", 0.0))
+                else:
+                    ox = float(obs[0])
+                    oy = float(obs[1])
+                    radius = float(obs[2])
+
+                dx_r = robot_pos[0] - ox
+                dy_r = robot_pos[1] - oy
+                if dx_r * dx_r + dy_r * dy_r <= (radius + robot_radius) ** 2:
+                    return True, {
+                        "type": "circle",
+                        "who": "robot",
+                        "idx": int(idx),
+                        "obstacle": [ox, oy, radius],
+                    }
+
+                dx_h = human_pos[0] - ox
+                dy_h = human_pos[1] - oy
+                if dx_h * dx_h + dy_h * dy_h <= (radius + human_radius) ** 2:
+                    return True, {
+                        "type": "circle",
+                        "who": "human",
+                        "idx": int(idx),
+                        "obstacle": [ox, oy, radius],
+                    }
+
+        if segment_obstacles is not None and len(segment_obstacles) > 0:
+            def point_segment_dist_sq(point: np.ndarray, a: np.ndarray, b: np.ndarray) -> float:
+                ab = b - a
+                denom = float(np.dot(ab, ab))
+                if denom < 1e-12:
+                    diff = point - a
+                    return float(np.dot(diff, diff))
+                t = float(np.dot(point - a, ab)) / denom
+                t = float(np.clip(t, 0.0, 1.0))
+                closest = a + t * ab
+                diff = point - closest
+                return float(np.dot(diff, diff))
+
+            for idx, seg in enumerate(segment_obstacles):
+                if isinstance(seg, dict):
+                    if "p1" in seg and "p2" in seg:
+                        p1 = np.array(seg["p1"], dtype=np.float32)
+                        p2 = np.array(seg["p2"], dtype=np.float32)
+                    else:
+                        p1 = np.array([seg.get("x1", 0.0), seg.get("y1", 0.0)], dtype=np.float32)
+                        p2 = np.array([seg.get("x2", 0.0), seg.get("y2", 0.0)], dtype=np.float32)
+                else:
+                    p1 = np.array([seg[0], seg[1]], dtype=np.float32)
+                    p2 = np.array([seg[2], seg[3]], dtype=np.float32)
+
+                if point_segment_dist_sq(robot_pos, p1, p2) <= (robot_radius ** 2):
+                    return True, {
+                        "type": "segment",
+                        "who": "robot",
+                        "idx": int(idx),
+                        "obstacle": [float(p1[0]), float(p1[1]), float(p2[0]), float(p2[1])],
+                    }
+                if point_segment_dist_sq(human_pos, p1, p2) <= (human_radius ** 2):
+                    return True, {
+                        "type": "segment",
+                        "who": "human",
+                        "idx": int(idx),
+                        "obstacle": [float(p1[0]), float(p1[1]), float(p2[0]), float(p2[1])],
+                    }
+
+        return False, None
+
 
 if __name__ == "__main__":
     # 测试物理引擎
@@ -164,4 +258,3 @@ if __name__ == "__main__":
         robot, human = engine.step()
         if i % 20 == 0:
             print(f"Step {i}: Robot={robot.position}, Human={human.position}")
-

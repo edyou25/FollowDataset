@@ -19,12 +19,17 @@ class Visualizer:
         'path_robot': (255, 100, 100),   # Robot trajectory - red
         'path_human': (100, 150, 255),   # Human trajectory - blue
         'robot': (255, 180, 50),         # Robot - orange
+        'robot_radius': (255, 220, 120),
         'human': (150, 200, 255),        # Human - light blue
+        'human_radius': (180, 230, 255),
         'leash': (200, 200, 200),        # Leash
         'start': (50, 255, 50),          # Start - bright green
         'end': (255, 50, 50),            # End - bright red
         'text': (220, 220, 220),
         'recording': (255, 80, 80),
+        'obstacle': (80, 80, 100),
+        'obstacle_inflated': (255, 200, 80),
+        'obstacle_segment': (100, 100, 130),
     }
     
     # Zoom settings
@@ -34,8 +39,8 @@ class Visualizer:
     
     def __init__(
         self,
-        width: int = 1600,  # 从 1200 增加到 1600
-        height: int = 1000,  # 从 800 增加到 1000
+        width: int = 2400,  # 从 1200 增加到 1600
+        height: int = 1600,  # 从 800 增加到 1000
         pixels_per_meter: float = 12.0
     ):
         self.width = width
@@ -113,6 +118,105 @@ class Visualizer:
             screen_pos = self.world_to_screen(point)
             pygame.draw.circle(self.screen, color, screen_pos, radius)
             pygame.draw.circle(self.screen, (255, 255, 255), screen_pos, max(1, radius - 2), 1)
+
+    def _parse_inflation(self, inflation: Optional[tuple]):
+        if inflation is None:
+            return None, None
+        inflate_values = None
+        inflate_colors = None
+        if isinstance(inflation, (list, tuple)):
+            values = [v for v in inflation if v is not None]
+            if len(values) == 2:
+                inflate_values = [float(values[0]), float(values[1])]
+                if abs(inflate_values[0] - inflate_values[1]) < 1e-6:
+                    inflate_values = [inflate_values[0]]
+            else:
+                inflate_values = [float(v) for v in values]
+        else:
+            inflate_values = [float(inflation)]
+        if inflate_values is not None and inflate_colors is None:
+            inflate_colors = [self.COLORS['obstacle_inflated']] * len(inflate_values)
+        return inflate_values, inflate_colors
+
+    def draw_obstacles(self, obstacles: Optional[np.ndarray], inflation: Optional[tuple] = None):
+        """Draw circular obstacles defined as (x, y, radius)."""
+        if obstacles is None or len(obstacles) == 0:
+            return
+        inflate_values, inflate_colors = self._parse_inflation(inflation)
+        for obs in obstacles:
+            if isinstance(obs, dict):
+                x = float(obs.get("x", 0.0))
+                y = float(obs.get("y", 0.0))
+                r = float(obs.get("r", 0.0))
+            else:
+                x = float(obs[0])
+                y = float(obs[1])
+                r = float(obs[2])
+            screen_pos = self.world_to_screen(np.array([x, y]))
+            radius_px = max(2, int(r * self.ppm))
+            pygame.draw.circle(self.screen, self.COLORS['obstacle'], screen_pos, radius_px)
+            pygame.draw.circle(self.screen, (200, 200, 220), screen_pos, radius_px, 1)
+            if inflate_values:
+                for idx, value in enumerate(inflate_values):
+                    if value <= 0:
+                        continue
+                    inflated_px = max(2, int((r + value) * self.ppm))
+                    color = inflate_colors[min(idx, len(inflate_colors) - 1)]
+                    pygame.draw.circle(self.screen, color, screen_pos, inflated_px, 3)
+
+    def draw_segments(self, segments: Optional[np.ndarray], inflation: Optional[tuple] = None, width: int = 3):
+        """Draw line segment obstacles defined as (x1, y1, x2, y2)."""
+        if segments is None or len(segments) == 0:
+            return
+        inflate_values, inflate_colors = self._parse_inflation(inflation)
+        for seg in segments:
+            if isinstance(seg, dict):
+                if "p1" in seg and "p2" in seg:
+                    p1 = np.array(seg["p1"], dtype=np.float32)
+                    p2 = np.array(seg["p2"], dtype=np.float32)
+                else:
+                    x1 = float(seg.get("x1", 0.0))
+                    y1 = float(seg.get("y1", 0.0))
+                    x2 = float(seg.get("x2", 0.0))
+                    y2 = float(seg.get("y2", 0.0))
+                    p1 = np.array([x1, y1], dtype=np.float32)
+                    p2 = np.array([x2, y2], dtype=np.float32)
+            else:
+                p1 = np.array([seg[0], seg[1]], dtype=np.float32)
+                p2 = np.array([seg[2], seg[3]], dtype=np.float32)
+            pygame.draw.line(
+                self.screen,
+                self.COLORS['obstacle_segment'],
+                self.world_to_screen(p1),
+                self.world_to_screen(p2),
+                width,
+            )
+            if not inflate_values:
+                continue
+            direction = p2 - p1
+            norm = np.linalg.norm(direction)
+            if norm < 1e-6:
+                continue
+            perp = np.array([-direction[1], direction[0]]) / norm
+            for idx, value in enumerate(inflate_values):
+                if value <= 0:
+                    continue
+                offset = perp * value
+                color = inflate_colors[min(idx, len(inflate_colors) - 1)]
+                pygame.draw.line(
+                    self.screen,
+                    color,
+                    self.world_to_screen(p1 + offset),
+                    self.world_to_screen(p2 + offset),
+                    3,
+                )
+                pygame.draw.line(
+                    self.screen,
+                    color,
+                    self.world_to_screen(p1 - offset),
+                    self.world_to_screen(p2 - offset),
+                    3,
+                )
     
     def draw_marker(self, position: np.ndarray, color: tuple, radius: int = 8, label: str = ""):
         """Draw marker point"""
@@ -156,6 +260,13 @@ class Visualizer:
         screen_pos = self.world_to_screen(position)
         pygame.draw.circle(self.screen, self.COLORS['human'], screen_pos, 10)
         pygame.draw.circle(self.screen, (255, 255, 255), screen_pos, 10, 2)
+
+    def draw_radius(self, position: np.ndarray, radius: float, color: tuple, width: int = 2):
+        if radius is None or radius <= 0:
+            return
+        screen_pos = self.world_to_screen(position)
+        radius_px = max(2, int(radius * self.ppm))
+        pygame.draw.circle(self.screen, color, screen_pos, radius_px, width)
     
     def draw_leash(self, robot_pos: np.ndarray, human_pos: np.ndarray, tension: float):
         """Draw leash"""
@@ -289,6 +400,11 @@ class Visualizer:
         human_trajectory: Optional[np.ndarray] = None,
         planned_path: Optional[np.ndarray] = None,
         lookahead_points: Optional[np.ndarray] = None,
+        obstacles: Optional[np.ndarray] = None,
+        segment_obstacles: Optional[np.ndarray] = None,
+        obstacle_inflation: Optional[tuple] = None,
+        robot_radius: Optional[float] = None,
+        human_radius: Optional[float] = None,
         start_pos: Optional[np.ndarray] = None,
         end_pos: Optional[np.ndarray] = None,
         leash_tension: float = 0.0,
@@ -308,6 +424,14 @@ class Visualizer:
         # Draw reference path
         if reference_path is not None and len(reference_path) > 0:
             self.draw_path(reference_path, self.COLORS['path_ref'], 3)
+
+        # Draw obstacles
+        if obstacles is not None and len(obstacles) > 0:
+            self.draw_obstacles(obstacles, obstacle_inflation)
+
+        # Draw segment obstacles
+        if segment_obstacles is not None and len(segment_obstacles) > 0:
+            self.draw_segments(segment_obstacles, obstacle_inflation)
 
         # Draw planned path
         if planned_path is not None and len(planned_path) > 1:
@@ -333,8 +457,10 @@ class Visualizer:
         
         # Draw leash
         self.draw_leash(robot_pos, human_pos, leash_tension)
-        
+
         # Draw human and robot
+        self.draw_radius(robot_pos, robot_radius, self.COLORS['robot_radius'])
+        self.draw_radius(human_pos, human_radius, self.COLORS['human_radius'])
         self.draw_human(human_pos)
         self.draw_robot(robot_pos, robot_heading)
         
