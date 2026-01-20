@@ -189,6 +189,12 @@ class ModelPlanner:
             except Exception:
                 cfg_obstacle_include_radius = None
 
+            cfg_segment_repr = None
+            try:
+                cfg_segment_repr = self.workspace.cfg.task.dataset.get("segment_repr")
+            except Exception:
+                cfg_segment_repr = None
+
             cfg_frame_stride = None
             try:
                 cfg_frame_stride = self.workspace.cfg.task.get("frame_stride")
@@ -209,6 +215,9 @@ class ModelPlanner:
             self.obstacle_include_radius = (
                 True if cfg_obstacle_include_radius is None else bool(cfg_obstacle_include_radius)
             )
+            self.segment_repr = str(cfg_segment_repr or "endpoints").lower()
+            if self.segment_repr not in ("endpoints", "closest_dir"):
+                raise ValueError(f"Unsupported segment_repr: {self.segment_repr}")
             circle_dim = 3 if self.obstacle_include_radius else 2
             self.obstacle_obs_dim = (
                 self.n_obstacle_circles * circle_dim + self.n_obstacle_segments * 4
@@ -256,6 +265,7 @@ class ModelPlanner:
             self.n_obstacle_circles = 0
             self.n_obstacle_segments = 0
             self.obstacle_include_radius = False
+            self.segment_repr = "endpoints"
             self.obstacle_obs_dim = 0
             self.n_lookahead = 20
             self.lookahead_stride = k_lookahead if k_lookahead is not None else 5
@@ -332,6 +342,7 @@ class ModelPlanner:
                     "n_obstacle_segments": int(self.n_obstacle_segments),
                     "obstacle_obs_dim": int(self.obstacle_obs_dim),
                     "obstacle_include_radius": bool(self.obstacle_include_radius),
+                    "segment_repr": self.segment_repr,
                     "inference_interval": int(self.inference_interval),
                     "turn_gain": float(self.turn_gain),
                     "curvature_slowdown": bool(self.curvature_slowdown),
@@ -638,12 +649,41 @@ class ModelPlanner:
             for i in range(self.n_obstacle_segments):
                 if i < count:
                     seg = selected_segments[i]
-                    p1 = seg[:2] - robot_pos
-                    p2 = seg[2:4] - robot_pos
-                    if self.robot_frame:
-                        p1 = self._rotate_rel(p1, heading)
-                        p2 = self._rotate_rel(p2, heading)
-                    feats[offset : offset + 4] = [p1[0], p1[1], p2[0], p2[1]]
+                    if self.segment_repr == "endpoints":
+                        p1 = seg[:2] - robot_pos
+                        p2 = seg[2:4] - robot_pos
+                        if self.robot_frame:
+                            p1 = self._rotate_rel(p1, heading)
+                            p2 = self._rotate_rel(p2, heading)
+                        feats[offset : offset + 4] = [p1[0], p1[1], p2[0], p2[1]]
+                    else:  # closest_dir
+                        p1_world = seg[:2].astype(np.float32)
+                        p2_world = seg[2:4].astype(np.float32)
+                        ab = p2_world - p1_world
+                        denom = float(np.dot(ab, ab))
+                        if denom < 1e-12:
+                            closest = p1_world
+                            direction = np.zeros((2,), dtype=np.float32)
+                        else:
+                            t_proj = float(np.dot(robot_pos - p1_world, ab)) / denom
+                            t_proj = float(np.clip(t_proj, 0.0, 1.0))
+                            closest = p1_world + t_proj * ab
+                            direction = (ab / np.sqrt(denom)).astype(np.float32)
+                            if (direction[0] < 0) or (
+                                abs(direction[0]) < 1e-6 and direction[1] < 0
+                            ):
+                                direction = -direction
+
+                        rel = (closest - robot_pos).astype(np.float32)
+                        if self.robot_frame:
+                            rel = self._rotate_rel(rel, heading)
+                            direction = self._rotate_rel(direction, heading)
+                        feats[offset : offset + 4] = [
+                            float(rel[0]),
+                            float(rel[1]),
+                            float(direction[0]),
+                            float(direction[1]),
+                        ]
                 offset += 4
 
         return feats
