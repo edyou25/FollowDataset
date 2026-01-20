@@ -30,6 +30,7 @@ class Visualizer:
         'obstacle': (80, 80, 100),
         'obstacle_inflated': (255, 200, 80),
         'obstacle_segment': (100, 100, 130),
+        'obstacle_obs': (255, 60, 60),
     }
     
     # Zoom settings
@@ -217,6 +218,58 @@ class Visualizer:
                     self.world_to_screen(p2 - offset),
                     3,
                 )
+
+    def draw_observation_obstacles(
+        self,
+        obstacles: Optional[np.ndarray] = None,
+        segment_obstacles: Optional[np.ndarray] = None,
+        circle_width: int = 4,
+        segment_width: int = 5,
+    ):
+        """Highlight obstacles that are currently used as model observations."""
+        if obstacles is not None and len(obstacles) > 0:
+            for obs in obstacles:
+                if isinstance(obs, dict):
+                    x = float(obs.get("x", 0.0))
+                    y = float(obs.get("y", 0.0))
+                    r = float(obs.get("r", 0.0))
+                else:
+                    x = float(obs[0])
+                    y = float(obs[1])
+                    r = float(obs[2])
+                screen_pos = self.world_to_screen(np.array([x, y], dtype=np.float32))
+                radius_px = max(2, int(r * self.ppm))
+                pygame.draw.circle(
+                    self.screen,
+                    self.COLORS["obstacle_obs"],
+                    screen_pos,
+                    radius_px,
+                    circle_width,
+                )
+
+        if segment_obstacles is not None and len(segment_obstacles) > 0:
+            for seg in segment_obstacles:
+                if isinstance(seg, dict):
+                    if "p1" in seg and "p2" in seg:
+                        p1 = np.array(seg["p1"], dtype=np.float32)
+                        p2 = np.array(seg["p2"], dtype=np.float32)
+                    else:
+                        x1 = float(seg.get("x1", 0.0))
+                        y1 = float(seg.get("y1", 0.0))
+                        x2 = float(seg.get("x2", 0.0))
+                        y2 = float(seg.get("y2", 0.0))
+                        p1 = np.array([x1, y1], dtype=np.float32)
+                        p2 = np.array([x2, y2], dtype=np.float32)
+                else:
+                    p1 = np.array([seg[0], seg[1]], dtype=np.float32)
+                    p2 = np.array([seg[2], seg[3]], dtype=np.float32)
+                pygame.draw.line(
+                    self.screen,
+                    self.COLORS["obstacle_obs"],
+                    self.world_to_screen(p1),
+                    self.world_to_screen(p2),
+                    segment_width,
+                )
     
     def draw_marker(self, position: np.ndarray, color: tuple, radius: int = 8, label: str = ""):
         """Draw marker point"""
@@ -402,6 +455,8 @@ class Visualizer:
         lookahead_points: Optional[np.ndarray] = None,
         obstacles: Optional[np.ndarray] = None,
         segment_obstacles: Optional[np.ndarray] = None,
+        obs_obstacles: Optional[np.ndarray] = None,
+        obs_segment_obstacles: Optional[np.ndarray] = None,
         obstacle_inflation: Optional[tuple] = None,
         robot_radius: Optional[float] = None,
         human_radius: Optional[float] = None,
@@ -432,6 +487,13 @@ class Visualizer:
         # Draw segment obstacles
         if segment_obstacles is not None and len(segment_obstacles) > 0:
             self.draw_segments(segment_obstacles, obstacle_inflation)
+
+        # Highlight obstacles used as observation
+        if (
+            (obs_obstacles is not None and len(obs_obstacles) > 0)
+            or (obs_segment_obstacles is not None and len(obs_segment_obstacles) > 0)
+        ):
+            self.draw_observation_obstacles(obs_obstacles, obs_segment_obstacles)
 
         # Draw planned path
         if planned_path is not None and len(planned_path) > 1:

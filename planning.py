@@ -11,6 +11,7 @@ Controls:
     Arrows Manual control (when policy disabled)
 """
 import argparse
+import copy
 import json
 import sys
 from collections import deque
@@ -58,7 +59,7 @@ class ModelPlanner:
 
     def __init__(
         self,
-        checkpoint_path: Path,
+        checkpoint_path: Optional[Path] = None,
         device: str = "auto",
         use_ema: bool = True,
         action_mode: Optional[str] = None,
@@ -84,156 +85,181 @@ class ModelPlanner:
         self.path_generator = PathGenerator(target_length=path_length)
         self.visualizer = Visualizer()
 
-        # Load policy
+        # Load policy if checkpoint is provided
         self.device = resolve_device(device)
-        self.workspace = TrainDiffusionUnetLowdimWorkspace.create_from_checkpoint(
-            str(checkpoint_path)
-        )
-        if use_ema and getattr(self.workspace, "ema_model", None) is not None:
-            self.policy = self.workspace.ema_model
+        self.workspace = None
+        self.policy = None
+        if checkpoint_path is not None and checkpoint_path.exists():
+            self.workspace = TrainDiffusionUnetLowdimWorkspace.create_from_checkpoint(
+                str(checkpoint_path)
+            )
+            if use_ema and getattr(self.workspace, "ema_model", None) is not None:
+                self.policy = self.workspace.ema_model
+            else:
+                self.policy = self.workspace.model
+            self.policy.to(self.device)
+            self.policy.eval()
         else:
-            self.policy = self.workspace.model
-        self.policy.to(self.device)
-        self.policy.eval()
+            # No checkpoint - will use manual control only
+            print("Warning: No checkpoint provided. Running in manual control mode only.")
+            print("Press 'P' key is disabled. Use arrow keys for manual control.")
 
-        cfg_action_mode = None
-        try:
-            cfg_action_mode = self.workspace.cfg.task.dataset.get("action_mode")
-        except Exception:
+        # Load configuration from checkpoint if available, otherwise use defaults
+        if self.workspace is not None:
             cfg_action_mode = None
-        self.action_mode = action_mode or cfg_action_mode or "forward_heading"
+            try:
+                cfg_action_mode = self.workspace.cfg.task.dataset.get("action_mode")
+            except Exception:
+                cfg_action_mode = None
+            self.action_mode = action_mode or cfg_action_mode or "forward_heading"
 
-        cfg_robot_frame = None
-        try:
-            cfg_robot_frame = self.workspace.cfg.task.dataset.get("robot_frame")
-        except Exception:
             cfg_robot_frame = None
-        self.robot_frame = bool(cfg_robot_frame) if cfg_robot_frame is not None else False
-        if self.action_mode == "forward_heading" and not self.robot_frame:
-            raise ValueError("action_mode='forward_heading' requires robot_frame=True")
+            try:
+                cfg_robot_frame = self.workspace.cfg.task.dataset.get("robot_frame")
+            except Exception:
+                cfg_robot_frame = None
+            self.robot_frame = bool(cfg_robot_frame) if cfg_robot_frame is not None else False
+            if self.action_mode == "forward_heading" and not self.robot_frame:
+                raise ValueError("action_mode='forward_heading' requires robot_frame=True")
 
-        cfg_robot_state = None
-        try:
-            cfg_robot_state = self.workspace.cfg.task.dataset.get("robot_state")
-        except Exception:
             cfg_robot_state = None
-        self.robot_state = str(cfg_robot_state or "zero").lower()
+            try:
+                cfg_robot_state = self.workspace.cfg.task.dataset.get("robot_state")
+            except Exception:
+                cfg_robot_state = None
+            self.robot_state = str(cfg_robot_state or "zero").lower()
 
-        cfg_k_lookahead = None
-        try:
-            cfg_k_lookahead = self.workspace.cfg.task.get("k_lookahead")
-        except Exception:
             cfg_k_lookahead = None
-        if cfg_k_lookahead is None:
             try:
-                cfg_k_lookahead = self.workspace.cfg.task.dataset.get("k_lookahead")
+                cfg_k_lookahead = self.workspace.cfg.task.get("k_lookahead")
             except Exception:
                 cfg_k_lookahead = None
-        if cfg_k_lookahead is None:
-            try:
-                cfg_k_lookahead = self.workspace.cfg.task.get("lookahead_stride")
-            except Exception:
-                cfg_k_lookahead = None
-        if cfg_k_lookahead is None:
-            try:
-                cfg_k_lookahead = self.workspace.cfg.task.dataset.get("lookahead_stride")
-            except Exception:
-                cfg_k_lookahead = None
+            if cfg_k_lookahead is None:
+                try:
+                    cfg_k_lookahead = self.workspace.cfg.task.dataset.get("k_lookahead")
+                except Exception:
+                    cfg_k_lookahead = None
+            if cfg_k_lookahead is None:
+                try:
+                    cfg_k_lookahead = self.workspace.cfg.task.get("lookahead_stride")
+                except Exception:
+                    cfg_k_lookahead = None
+            if cfg_k_lookahead is None:
+                try:
+                    cfg_k_lookahead = self.workspace.cfg.task.dataset.get("lookahead_stride")
+                except Exception:
+                    cfg_k_lookahead = None
 
-        cfg_n_lookahead = None
-        try:
-            cfg_n_lookahead = self.workspace.cfg.task.get("n_lookahead")
-        except Exception:
             cfg_n_lookahead = None
-        if cfg_n_lookahead is None:
             try:
-                cfg_n_lookahead = self.workspace.cfg.task.dataset.get("n_lookahead")
+                cfg_n_lookahead = self.workspace.cfg.task.get("n_lookahead")
             except Exception:
                 cfg_n_lookahead = None
+            if cfg_n_lookahead is None:
+                try:
+                    cfg_n_lookahead = self.workspace.cfg.task.dataset.get("n_lookahead")
+                except Exception:
+                    cfg_n_lookahead = None
 
-        cfg_n_obstacle_circles = None
-        try:
-            cfg_n_obstacle_circles = self.workspace.cfg.task.get("n_obstacle_circles")
-        except Exception:
             cfg_n_obstacle_circles = None
-        if cfg_n_obstacle_circles is None:
             try:
-                cfg_n_obstacle_circles = self.workspace.cfg.task.dataset.get("n_obstacle_circles")
+                cfg_n_obstacle_circles = self.workspace.cfg.task.get("n_obstacle_circles")
             except Exception:
                 cfg_n_obstacle_circles = None
+            if cfg_n_obstacle_circles is None:
+                try:
+                    cfg_n_obstacle_circles = self.workspace.cfg.task.dataset.get("n_obstacle_circles")
+                except Exception:
+                    cfg_n_obstacle_circles = None
 
-        cfg_n_obstacle_segments = None
-        try:
-            cfg_n_obstacle_segments = self.workspace.cfg.task.get("n_obstacle_segments")
-        except Exception:
             cfg_n_obstacle_segments = None
-        if cfg_n_obstacle_segments is None:
             try:
-                cfg_n_obstacle_segments = self.workspace.cfg.task.dataset.get("n_obstacle_segments")
+                cfg_n_obstacle_segments = self.workspace.cfg.task.get("n_obstacle_segments")
             except Exception:
                 cfg_n_obstacle_segments = None
+            if cfg_n_obstacle_segments is None:
+                try:
+                    cfg_n_obstacle_segments = self.workspace.cfg.task.dataset.get("n_obstacle_segments")
+                except Exception:
+                    cfg_n_obstacle_segments = None
 
-        cfg_obstacle_include_radius = None
-        try:
-            cfg_obstacle_include_radius = self.workspace.cfg.task.dataset.get("obstacle_include_radius")
-        except Exception:
             cfg_obstacle_include_radius = None
-
-        cfg_frame_stride = None
-        try:
-            cfg_frame_stride = self.workspace.cfg.task.get("frame_stride")
-        except Exception:
-            cfg_frame_stride = None
-        if cfg_frame_stride is None:
             try:
-                cfg_frame_stride = self.workspace.cfg.task.dataset.get("frame_stride")
+                cfg_obstacle_include_radius = self.workspace.cfg.task.dataset.get("obstacle_include_radius")
+            except Exception:
+                cfg_obstacle_include_radius = None
+
+            cfg_frame_stride = None
+            try:
+                cfg_frame_stride = self.workspace.cfg.task.get("frame_stride")
             except Exception:
                 cfg_frame_stride = None
+            if cfg_frame_stride is None:
+                try:
+                    cfg_frame_stride = self.workspace.cfg.task.dataset.get("frame_stride")
+                except Exception:
+                    cfg_frame_stride = None
 
-        self.obs_dim = int(self.policy.obs_dim)
-        self.action_dim = int(self.policy.action_dim)
-        self.n_obs_steps = int(self.policy.n_obs_steps)
-        self.n_action_steps = int(self.policy.n_action_steps)
-        self.n_obstacle_circles = max(0, int(cfg_n_obstacle_circles or 0))
-        self.n_obstacle_segments = max(0, int(cfg_n_obstacle_segments or 0))
-        self.obstacle_include_radius = (
-            True if cfg_obstacle_include_radius is None else bool(cfg_obstacle_include_radius)
-        )
-        circle_dim = 3 if self.obstacle_include_radius else 2
-        self.obstacle_obs_dim = (
-            self.n_obstacle_circles * circle_dim + self.n_obstacle_segments * 4
-        )
-        if cfg_n_lookahead is None:
-            extra_obs = self.obs_dim - 4 - self.obstacle_obs_dim
-            if extra_obs < 0 or extra_obs % 2 != 0:
-                raise ValueError(
-                    f"Unsupported obs_dim={self.obs_dim}, expected 4 + 2*N + {self.obstacle_obs_dim}"
-                )
-            self.n_lookahead = extra_obs // 2
-        else:
-            self.n_lookahead = int(cfg_n_lookahead)
-            expected_obs_dim = 4 + 2 * self.n_lookahead + self.obstacle_obs_dim
-            if self.obs_dim != expected_obs_dim:
+            self.obs_dim = int(self.policy.obs_dim)
+            self.action_dim = int(self.policy.action_dim)
+            self.n_obs_steps = int(self.policy.n_obs_steps)
+            self.n_action_steps = int(self.policy.n_action_steps)
+            self.n_obstacle_circles = max(0, int(cfg_n_obstacle_circles or 0))
+            self.n_obstacle_segments = max(0, int(cfg_n_obstacle_segments or 0))
+            self.obstacle_include_radius = (
+                True if cfg_obstacle_include_radius is None else bool(cfg_obstacle_include_radius)
+            )
+            circle_dim = 3 if self.obstacle_include_radius else 2
+            self.obstacle_obs_dim = (
+                self.n_obstacle_circles * circle_dim + self.n_obstacle_segments * 4
+            )
+            if cfg_n_lookahead is None:
                 extra_obs = self.obs_dim - 4 - self.obstacle_obs_dim
-                if extra_obs >= 0 and extra_obs % 2 == 0:
-                    self.n_lookahead = extra_obs // 2
-                    print(
-                        f"[warn] obs_dim mismatch (expected {expected_obs_dim}, got {self.obs_dim}); "
-                        f"using derived n_lookahead={self.n_lookahead}"
-                    )
-                else:
+                if extra_obs < 0 or extra_obs % 2 != 0:
                     raise ValueError(
-                        f"Unsupported obs_dim={self.obs_dim}, expected {expected_obs_dim}"
+                        f"Unsupported obs_dim={self.obs_dim}, expected 4 + 2*N + {self.obstacle_obs_dim}"
                     )
-        stride = k_lookahead if k_lookahead is not None else cfg_k_lookahead
-        if stride is None:
-            stride = 5
-        self.lookahead_stride = max(1, int(stride))
+                self.n_lookahead = extra_obs // 2
+            else:
+                self.n_lookahead = int(cfg_n_lookahead)
+                expected_obs_dim = 4 + 2 * self.n_lookahead + self.obstacle_obs_dim
+                if self.obs_dim != expected_obs_dim:
+                    extra_obs = self.obs_dim - 4 - self.obstacle_obs_dim
+                    if extra_obs >= 0 and extra_obs % 2 == 0:
+                        self.n_lookahead = extra_obs // 2
+                        print(
+                            f"[warn] obs_dim mismatch (expected {expected_obs_dim}, got {self.obs_dim}); "
+                            f"using derived n_lookahead={self.n_lookahead}"
+                        )
+                    else:
+                        raise ValueError(
+                            f"Unsupported obs_dim={self.obs_dim}, expected {expected_obs_dim}"
+                        )
+            stride = k_lookahead if k_lookahead is not None else cfg_k_lookahead
+            if stride is None:
+                stride = 5
+            self.lookahead_stride = max(1, int(stride))
 
-        stride = frame_stride if frame_stride is not None else cfg_frame_stride
-        if stride is None:
-            stride = 1
-        self.frame_stride = max(1, int(stride))
+            stride = frame_stride if frame_stride is not None else cfg_frame_stride
+            if stride is None:
+                stride = 1
+            self.frame_stride = max(1, int(stride))
+        else:
+            # Default values when no checkpoint is provided
+            self.action_mode = action_mode or "forward_heading"
+            self.robot_frame = True
+            self.robot_state = "vel"
+            self.obs_dim = 44  # Default: 4 (robot+human) + 2*20 (lookahead) + 0 (no obstacles)
+            self.action_dim = 2
+            self.n_obs_steps = 1
+            self.n_action_steps = 24
+            self.n_obstacle_circles = 0
+            self.n_obstacle_segments = 0
+            self.obstacle_include_radius = False
+            self.obstacle_obs_dim = 0
+            self.n_lookahead = 20
+            self.lookahead_stride = k_lookahead if k_lookahead is not None else 5
+            self.frame_stride = frame_stride if frame_stride is not None else 1
         self.data_dt = self.sim_dt * self.frame_stride
         self.physics = PhysicsEngine(
             leash_length=leash_length,
@@ -274,7 +300,7 @@ class ModelPlanner:
         self.current_speed_scale = 1.0
         
         # Reduce inference steps for faster performance
-        if hasattr(self.policy, 'num_inference_steps'):
+        if self.policy is not None and hasattr(self.policy, 'num_inference_steps'):
             original_steps = self.policy.num_inference_steps
             self.policy.num_inference_steps = inference_steps
             if original_steps != inference_steps:
@@ -352,7 +378,8 @@ class ModelPlanner:
         self.frame_count = 0
         self.prev_robot_pos = None
         self._seed_obs_history(self.physics.robot.position, self.physics.human.position)
-        self.policy.reset()
+        if self.policy is not None:
+            self.policy.reset()
         # Reset action cache
         self.cached_action_seq = None
         self.cached_action_idx = 0
@@ -452,8 +479,11 @@ class ModelPlanner:
                 elif event.key == pygame.K_n:
                     self._generate_new_path()
                 elif event.key == pygame.K_p:
-                    self.use_policy = not self.use_policy
-                    mode = "policy" if self.use_policy else "manual"
+                    if self.policy is not None:
+                        self.use_policy = not self.use_policy
+                        mode = "policy" if self.use_policy else "manual"
+                    else:
+                        mode = "manual (no checkpoint)"
                     print(f"Control mode: {mode}")
 
     def _get_manual_control(self) -> Tuple[float, float]:
@@ -538,6 +568,46 @@ class ModelPlanner:
         local_y = -sin_h * rel[:, 0] + cos_h * rel[:, 1]
         return np.stack([local_x, local_y], axis=-1).reshape(-1).astype(np.float32)
 
+    def _select_obstacles_for_observation(
+        self, robot_pos: np.ndarray
+    ) -> tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+        if self.current_path_data is None:
+            return None, None
+
+        selected_circles = None
+        selected_segments = None
+
+        if self.n_obstacle_circles > 0:
+            obstacles = self.current_path_data.get("obstacles")
+            if obstacles is not None and len(obstacles) > 0:
+                circle_obs = np.asarray(obstacles, dtype=np.float32)
+                if circle_obs.ndim == 2 and circle_obs.shape[1] >= 3:
+                    centers = circle_obs[:, :2]
+                    rel = centers - robot_pos
+                    dist_sq = np.sum(rel * rel, axis=1)
+                    order = np.argsort(dist_sq)
+                    count = min(self.n_obstacle_circles, len(order))
+                    if count > 0:
+                        selected_circles = circle_obs[order[:count], :3]
+
+        if self.n_obstacle_segments > 0:
+            segments = self.current_path_data.get("segment_obstacles")
+            if segments is not None and len(segments) > 0:
+                seg_obs = np.asarray(segments, dtype=np.float32)
+                if seg_obs.ndim == 2 and seg_obs.shape[1] >= 4:
+                    seg_obs = seg_obs[:, :4]
+                    dist_sq = np.zeros((len(seg_obs),), dtype=np.float32)
+                    for i, seg in enumerate(seg_obs):
+                        dist_sq[i] = self._point_segment_dist_sq(
+                            robot_pos, seg[:2], seg[2:4]
+                        )
+                    order = np.argsort(dist_sq)
+                    count = min(self.n_obstacle_segments, len(order))
+                    if count > 0:
+                        selected_segments = seg_obs[order[:count], :4]
+
+        return selected_circles, selected_segments
+
     def _build_obstacle_features(self, robot_pos: np.ndarray, heading: float) -> np.ndarray:
         circle_dim = 3 if self.obstacle_include_radius else 2
         total_dim = self.n_obstacle_circles * circle_dim + self.n_obstacle_segments * 4
@@ -549,59 +619,32 @@ class ModelPlanner:
         if self.current_path_data is None:
             return feats
 
-        obstacles = self.current_path_data.get("obstacles")
-        segments = self.current_path_data.get("segment_obstacles")
+        selected_circles, selected_segments = self._select_obstacles_for_observation(robot_pos)
 
         if self.n_obstacle_circles > 0:
-            if obstacles is not None and len(obstacles) > 0:
-                circle_obs = np.asarray(obstacles, dtype=np.float32)
-                if circle_obs.ndim == 2 and circle_obs.shape[1] >= 3:
-                    centers = circle_obs[:, :2]
-                    radii = circle_obs[:, 2]
-                    rel = centers - robot_pos
-                    dist_sq = np.sum(rel * rel, axis=1)
-                    order = np.argsort(dist_sq)
-                    count = min(self.n_obstacle_circles, len(order))
-                    for i in range(self.n_obstacle_circles):
-                        if i < count:
-                            rel_i = rel[order[i]]
-                            if self.robot_frame:
-                                rel_i = self._rotate_rel(rel_i, heading)
-                            feats[offset : offset + 2] = rel_i
-                            if self.obstacle_include_radius:
-                                feats[offset + 2] = radii[order[i]]
-                        offset += circle_dim
-                else:
-                    offset += self.n_obstacle_circles * circle_dim
-            else:
-                offset += self.n_obstacle_circles * circle_dim
+            count = 0 if selected_circles is None else len(selected_circles)
+            for i in range(self.n_obstacle_circles):
+                if i < count:
+                    rel_i = selected_circles[i, :2] - robot_pos
+                    if self.robot_frame:
+                        rel_i = self._rotate_rel(rel_i, heading)
+                    feats[offset : offset + 2] = rel_i
+                    if self.obstacle_include_radius:
+                        feats[offset + 2] = float(selected_circles[i, 2])
+                offset += circle_dim
 
         if self.n_obstacle_segments > 0:
-            if segments is not None and len(segments) > 0:
-                seg_obs = np.asarray(segments, dtype=np.float32)
-                if seg_obs.ndim == 2 and seg_obs.shape[1] >= 4:
-                    seg_obs = seg_obs[:, :4]
-                    dist_sq = np.zeros((len(seg_obs),), dtype=np.float32)
-                    for i, seg in enumerate(seg_obs):
-                        p1 = seg[:2]
-                        p2 = seg[2:4]
-                        dist_sq[i] = self._point_segment_dist_sq(robot_pos, p1, p2)
-                    order = np.argsort(dist_sq)
-                    count = min(self.n_obstacle_segments, len(order))
-                    for i in range(self.n_obstacle_segments):
-                        if i < count:
-                            seg = seg_obs[order[i]]
-                            p1 = seg[:2] - robot_pos
-                            p2 = seg[2:4] - robot_pos
-                            if self.robot_frame:
-                                p1 = self._rotate_rel(p1, heading)
-                                p2 = self._rotate_rel(p2, heading)
-                            feats[offset : offset + 4] = [p1[0], p1[1], p2[0], p2[1]]
-                        offset += 4
-                else:
-                    offset += self.n_obstacle_segments * 4
-            else:
-                offset += self.n_obstacle_segments * 4
+            count = 0 if selected_segments is None else len(selected_segments)
+            for i in range(self.n_obstacle_segments):
+                if i < count:
+                    seg = selected_segments[i]
+                    p1 = seg[:2] - robot_pos
+                    p2 = seg[2:4] - robot_pos
+                    if self.robot_frame:
+                        p1 = self._rotate_rel(p1, heading)
+                        p2 = self._rotate_rel(p2, heading)
+                    feats[offset : offset + 4] = [p1[0], p1[1], p2[0], p2[1]]
+                offset += 4
 
         return feats
 
@@ -629,14 +672,51 @@ class ModelPlanner:
         if action_seq.size == 0:
             return None
         if self.action_mode == "forward_heading":
+            # Rollout using the same control mapping + physics integration as execution,
+            # so the visualized planned path matches what would actually happen.
+            sim = copy.deepcopy(self.physics)
+            sim.robot.position = robot_pos.astype(np.float32).copy()
             points = []
-            pos = robot_pos.astype(np.float32).copy()
-            heading = float(self.physics.robot.heading)
+            obstacles = self.current_path_data.get("obstacles") if self.current_path_data else None
+            segments = (
+                self.current_path_data.get("segment_obstacles") if self.current_path_data else None
+            )
+
             for act in action_seq:
-                forward = float(act[0])
-                heading += float(act[1])
-                pos = pos + np.array([np.cos(heading), np.sin(heading)], dtype=np.float32) * forward
-                points.append(pos.copy())
+                forward_delta = float(act[0])
+                heading_delta = float(act[1])
+
+                turn_speed = float(sim.turn_speed)
+                robot_speed = float(sim.robot_speed)
+                turn_delta = heading_delta * float(self.turn_gain)
+                turn = turn_delta / (turn_speed * self.data_dt) if turn_speed > 0 else 0.0
+                forward = forward_delta / (robot_speed * self.data_dt) if robot_speed > 0 else 0.0
+
+                if self.curvature_slowdown and turn_speed > 0:
+                    max_turn = turn_speed * self.data_dt
+                    if max_turn > 1e-6:
+                        ratio = min(1.0, abs(turn_delta) / max_turn)
+                        speed_scale = max(
+                            float(self.min_speed_scale),
+                            1.0 - float(self.curvature_scale) * ratio,
+                        )
+                        forward *= speed_scale
+
+                forward = float(np.clip(forward, -1.0, 1.0))
+                turn = float(np.clip(turn, -1.0, 1.0))
+                sim.set_control(forward, turn)
+
+                # One policy action corresponds to one "data step" = frame_stride sim steps.
+                for _ in range(int(self.frame_stride)):
+                    robot_state, _human_state = sim.step()
+                    points.append(robot_state.position.copy())
+                    if obstacles is not None or segments is not None:
+                        collided, _info = sim.check_collision(
+                            obstacles, segment_obstacles=segments
+                        )
+                        if collided:
+                            return np.stack(points, axis=0) if points else None
+
             return np.stack(points, axis=0) if points else None
         if self.robot_frame and self.action_mode in ("delta", "velocity"):
             cos_h = float(np.cos(self.physics.robot.heading))
@@ -707,7 +787,7 @@ class ModelPlanner:
         is_data_step = (self.frame_count % self.frame_stride == 0)
 
         if not self.paused:
-            if self.use_policy:
+            if self.use_policy and self.policy is not None:
                 # Update policy/action at data rate; hold control between data steps.
                 if is_data_step:
                     if (self.cached_action_seq is None or 
@@ -874,6 +954,9 @@ class ModelPlanner:
             ],
         }
 
+        obs_obstacles, obs_segment_obstacles = self._select_obstacles_for_observation(
+            robot_state.position
+        )
         self.visualizer.render(
             robot_pos=robot_state.position,
             robot_heading=robot_state.heading,
@@ -885,6 +968,8 @@ class ModelPlanner:
             lookahead_points=self.lookahead_world,
             obstacles=self.current_path_data.get("obstacles") if self.current_path_data else None,
             segment_obstacles=self.current_path_data.get("segment_obstacles") if self.current_path_data else None,
+            obs_obstacles=obs_obstacles,
+            obs_segment_obstacles=obs_segment_obstacles,
             obstacle_inflation=(self.physics.robot_radius, self.physics.human_radius),
             robot_radius=self.physics.robot_radius,
             human_radius=self.physics.human_radius,
@@ -919,14 +1004,14 @@ def main():
     
     # Default checkpoint path - use latest available checkpoint
     default_ckpt = Path(
-        "/home/yyf/IROS2026/diffusion_policy/data/outputs/2026.01.15/12.55.28_train_diffusion_unet_lowdim_guide_guide_lowdim/checkpoints/epoch=0240-test_mean_score=0.637.ckpt"
+        "/home/yyf/IROS2026/diffusion_policy/data/outputs/2026.01.18/15.40.06_train_diffusion_unet_lowdim_guide_guide_lowdim/checkpoints/epoch=0270-test_mean_score=0.323.ckpt"
     )
     
     parser.add_argument(
         "--ckpt",
         type=Path,
         default=default_ckpt,
-        help="Path to the trained checkpoint (.ckpt)",
+        help="Path to the trained checkpoint (.ckpt). If not found, will run in manual control mode.",
     )
     parser.add_argument("--device", default="auto", help="cpu, cuda:0, or auto")
     parser.add_argument("--no-ema", action="store_true", help="Use non-EMA model")
@@ -993,18 +1078,20 @@ def main():
     parser.add_argument("--no-log", action="store_true", help="Disable planning logs")
     args = parser.parse_args()
 
-    # Validate checkpoint file exists
-    if not args.ckpt.exists():
-        print(f"Error: Checkpoint file not found: {args.ckpt}")
+    # Check if checkpoint file exists, but don't exit if it doesn't (will use manual control)
+    checkpoint_path = args.ckpt if args.ckpt.exists() else None
+    if checkpoint_path is None:
+        print(f"Warning: Checkpoint file not found: {args.ckpt}")
+        print("Running in manual control mode only (no policy available).")
         print("\nAvailable checkpoints:")
         outputs_dir = Path("/home/yyf/IROS2026/diffusion_policy/data/outputs")
         if outputs_dir.exists():
             for ckpt in sorted(outputs_dir.rglob("*.ckpt")):
                 print(f"  {ckpt}")
-        sys.exit(1)
+        print("\nContinuing with manual control...")
 
     planner = ModelPlanner(
-        checkpoint_path=args.ckpt,
+        checkpoint_path=checkpoint_path,
         device=args.device,
         use_ema=not args.no_ema,
         action_mode=args.action_mode,
