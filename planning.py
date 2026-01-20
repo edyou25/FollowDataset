@@ -708,6 +708,40 @@ class ModelPlanner:
         diff = point - closest
         return float(np.dot(diff, diff))
 
+    def _segments_closest_points_and_dirs(
+        self,
+        robot_pos: np.ndarray,
+        segments: Optional[np.ndarray],
+    ) -> tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+        if segments is None or len(segments) == 0:
+            return None, None
+        segs = np.asarray(segments, dtype=np.float32)
+        if segs.ndim != 2 or segs.shape[1] < 4:
+            return None, None
+        segs = segs[:, :4]
+
+        closest_points = np.zeros((len(segs), 2), dtype=np.float32)
+        directions = np.zeros((len(segs), 2), dtype=np.float32)
+        for i, seg in enumerate(segs):
+            p1 = seg[:2]
+            p2 = seg[2:4]
+            ab = p2 - p1
+            denom = float(np.dot(ab, ab))
+            if denom < 1e-12:
+                closest = p1
+                direction = np.zeros((2,), dtype=np.float32)
+            else:
+                t_proj = float(np.dot(robot_pos - p1, ab)) / denom
+                t_proj = float(np.clip(t_proj, 0.0, 1.0))
+                closest = p1 + t_proj * ab
+                direction = (ab / np.sqrt(denom)).astype(np.float32)
+                if (direction[0] < 0) or (abs(direction[0]) < 1e-6 and direction[1] < 0):
+                    direction = -direction
+            closest_points[i] = closest
+            directions[i] = direction
+
+        return closest_points, directions
+
     def _actions_to_path(self, robot_pos: np.ndarray, action_seq: np.ndarray) -> Optional[np.ndarray]:
         if action_seq.size == 0:
             return None
@@ -997,6 +1031,9 @@ class ModelPlanner:
         obs_obstacles, obs_segment_obstacles = self._select_obstacles_for_observation(
             robot_state.position
         )
+        seg_closest_pts, seg_dirs = self._segments_closest_points_and_dirs(
+            robot_state.position, obs_segment_obstacles
+        )
         self.visualizer.render(
             robot_pos=robot_state.position,
             robot_heading=robot_state.heading,
@@ -1010,6 +1047,8 @@ class ModelPlanner:
             segment_obstacles=self.current_path_data.get("segment_obstacles") if self.current_path_data else None,
             obs_obstacles=obs_obstacles,
             obs_segment_obstacles=obs_segment_obstacles,
+            obs_segment_closest_points=seg_closest_pts,
+            obs_segment_dirs=seg_dirs,
             obstacle_inflation=(self.physics.robot_radius, self.physics.human_radius),
             robot_radius=self.physics.robot_radius,
             human_radius=self.physics.human_radius,
@@ -1044,7 +1083,7 @@ def main():
     
     # Default checkpoint path - use latest available checkpoint
     default_ckpt = Path(
-        "/home/yyf/IROS2026/diffusion_policy/data/outputs/2026.01.18/15.40.06_train_diffusion_unet_lowdim_guide_guide_lowdim/checkpoints/epoch=0270-test_mean_score=0.323.ckpt"
+        "/home/yyf/IROS2026/diffusion_policy/data/outputs/2026.01.20/17.44.20_train_diffusion_unet_lowdim_guide_guide_lowdim/checkpoints/epoch=0270-test_mean_score=0.392.ckpt"
     )
     
     parser.add_argument(

@@ -270,6 +270,49 @@ class Visualizer:
                     self.world_to_screen(p2),
                     segment_width,
                 )
+
+    def draw_observation_segment_vectors(
+        self,
+        robot_pos: np.ndarray,
+        closest_points: Optional[np.ndarray] = None,
+        directions: Optional[np.ndarray] = None,
+        arrow_length: float = 1.0,
+    ):
+        """Draw closest-point vector and wall direction for observed segments."""
+        if closest_points is None or len(closest_points) == 0:
+            return
+
+        pts = np.asarray(closest_points, dtype=np.float32)
+        dirs = None
+        if directions is not None and len(directions) == len(closest_points):
+            dirs = np.asarray(directions, dtype=np.float32)
+
+        robot_screen = self.world_to_screen(robot_pos)
+        color = self.COLORS["obstacle_obs"]
+        for i, cp in enumerate(pts):
+            cp_screen = self.world_to_screen(cp)
+            pygame.draw.line(self.screen, color, robot_screen, cp_screen, 2)
+            pygame.draw.circle(self.screen, color, cp_screen, 6, 2)
+
+            if dirs is None:
+                continue
+            d = dirs[i]
+            norm = float(np.linalg.norm(d))
+            if norm < 1e-6:
+                continue
+            d = d / norm
+            end = cp + d * float(arrow_length)
+            end_screen = self.world_to_screen(end)
+            pygame.draw.line(self.screen, color, cp_screen, end_screen, 3)
+
+            # arrow head
+            head_len = 0.25
+            head_w = 0.12
+            perp = np.array([-d[1], d[0]], dtype=np.float32)
+            left = end - d * head_len + perp * head_w
+            right = end - d * head_len - perp * head_w
+            pygame.draw.line(self.screen, color, end_screen, self.world_to_screen(left), 3)
+            pygame.draw.line(self.screen, color, end_screen, self.world_to_screen(right), 3)
     
     def draw_marker(self, position: np.ndarray, color: tuple, radius: int = 8, label: str = ""):
         """Draw marker point"""
@@ -457,6 +500,8 @@ class Visualizer:
         segment_obstacles: Optional[np.ndarray] = None,
         obs_obstacles: Optional[np.ndarray] = None,
         obs_segment_obstacles: Optional[np.ndarray] = None,
+        obs_segment_closest_points: Optional[np.ndarray] = None,
+        obs_segment_dirs: Optional[np.ndarray] = None,
         obstacle_inflation: Optional[tuple] = None,
         robot_radius: Optional[float] = None,
         human_radius: Optional[float] = None,
@@ -494,6 +539,10 @@ class Visualizer:
             or (obs_segment_obstacles is not None and len(obs_segment_obstacles) > 0)
         ):
             self.draw_observation_obstacles(obs_obstacles, obs_segment_obstacles)
+        if obs_segment_closest_points is not None and len(obs_segment_closest_points) > 0:
+            self.draw_observation_segment_vectors(
+                robot_pos, obs_segment_closest_points, obs_segment_dirs
+            )
 
         # Draw planned path
         if planned_path is not None and len(planned_path) > 1:
