@@ -31,6 +31,8 @@ class Visualizer:
         'obstacle_inflated': (255, 200, 80),
         'obstacle_segment': (100, 100, 130),
         'obstacle_obs': (255, 60, 60),
+        'clear_safe': (80, 220, 120),
+        'clear_warn': (255, 200, 80),
     }
     
     # Zoom settings
@@ -59,6 +61,26 @@ class Visualizer:
         self.clock = pygame.time.Clock()
         self.font = pygame.font.Font(None, 28)
         self.font_large = pygame.font.Font(None, 36)
+
+        # Layer visibility (click legend to toggle)
+        self.layer_visibility = {
+            "grid": True,
+            "reference_path": True,
+            "planned_path": True,
+            "lookahead_points": True,
+            "robot_trajectory": True,
+            "human_trajectory": True,
+            "obstacles": True,
+            "segment_obstacles": True,
+            "obs_obstacles": True,
+            "obs_segment_vectors": True,
+            "human_clearance": True,
+            "start_end": True,
+            "leash": True,
+            "agent_radii": True,
+        }
+        self._legend_hitboxes: dict[str, pygame.Rect] = {}
+        self._legend_hover_key: Optional[str] = None
         
     def world_to_screen(self, world_pos: np.ndarray) -> tuple:
         """Convert world coordinates to screen coordinates"""
@@ -84,6 +106,107 @@ class Visualizer:
                 self.ppm = min(self.ppm * self.ZOOM_STEP, self.MAX_PPM)
             elif event.y < 0:  # Scroll down - zoom out
                 self.ppm = max(self.ppm / self.ZOOM_STEP, self.MIN_PPM)
+
+    def handle_event(self, event: pygame.event.Event):
+        """Handle mouse events (zoom + legend toggles)."""
+        self.handle_zoom(event)
+        self._handle_legend_event(event)
+
+    def _legend_items(self) -> list[dict]:
+        return [
+            {"key": "grid", "label": "Grid", "color": self.COLORS["grid"]},
+            {"key": "reference_path", "label": "Ref Path", "color": self.COLORS["path_ref"]},
+            {"key": "planned_path", "label": "Planned Path", "color": self.COLORS["path_plan"]},
+            {"key": "lookahead_points", "label": "Lookahead", "color": self.COLORS["lookahead"]},
+            {"key": "robot_trajectory", "label": "Robot Trail", "color": self.COLORS["path_robot"]},
+            {"key": "human_trajectory", "label": "Human Trail", "color": self.COLORS["path_human"]},
+            {"key": "obstacles", "label": "Circle Obstacles", "color": self.COLORS["obstacle"]},
+            {"key": "segment_obstacles", "label": "Wall Segments", "color": self.COLORS["obstacle_segment"]},
+            {"key": "obs_obstacles", "label": "Obs Highlight", "color": self.COLORS["obstacle_obs"]},
+            {"key": "obs_segment_vectors", "label": "Obs Vectors", "color": self.COLORS["obstacle_obs"]},
+            {"key": "human_clearance", "label": "Human Clearance", "color": self.COLORS["clear_safe"]},
+            {"key": "start_end", "label": "Start/End", "color": self.COLORS["start"]},
+            {"key": "leash", "label": "Leash", "color": self.COLORS["leash"]},
+            {"key": "agent_radii", "label": "Agent Radii", "color": self.COLORS["robot_radius"]},
+        ]
+
+    def _handle_legend_event(self, event: pygame.event.Event):
+        if event.type == pygame.MOUSEMOTION:
+            pos = getattr(event, "pos", None)
+            if pos is None:
+                return
+            hover = None
+            for key, rect in self._legend_hitboxes.items():
+                if rect.collidepoint(pos):
+                    hover = key
+                    break
+            self._legend_hover_key = hover
+            return
+
+        if event.type != pygame.MOUSEBUTTONDOWN:
+            return
+        if getattr(event, "button", None) != 1:
+            return
+        pos = getattr(event, "pos", None)
+        if pos is None:
+            return
+        for key, rect in self._legend_hitboxes.items():
+            if rect.collidepoint(pos):
+                self.layer_visibility[key] = not bool(self.layer_visibility.get(key, True))
+                return
+
+    def draw_legend(self, x: Optional[int] = None, y: Optional[int] = None):
+        items = self._legend_items()
+        if not items:
+            return
+
+        panel_width = 260
+        header_h = 26
+        row_h = 24
+        pad = 10
+        panel_height = header_h + len(items) * row_h + pad
+
+        if x is None:
+            x = self.width - panel_width - 15
+        if y is None:
+            y = 230
+
+        panel_rect = pygame.Rect(x, y, panel_width, panel_height)
+        pygame.draw.rect(self.screen, (35, 35, 50), panel_rect, border_radius=8)
+        pygame.draw.rect(self.screen, (60, 60, 80), panel_rect, 2, border_radius=8)
+
+        title = self.font.render("Legend (click to toggle)", True, (180, 180, 180))
+        self.screen.blit(title, (x + 10, y + 6))
+
+        self._legend_hitboxes = {}
+        for i, item in enumerate(items):
+            key = item["key"]
+            label = item["label"]
+            color = item["color"]
+            enabled = bool(self.layer_visibility.get(key, True))
+
+            row_y = y + header_h + i * row_h
+            row_rect = pygame.Rect(x + 8, row_y, panel_width - 16, row_h)
+            self._legend_hitboxes[key] = row_rect
+
+            if self._legend_hover_key == key:
+                pygame.draw.rect(self.screen, (50, 50, 70), row_rect, border_radius=6)
+
+            box = pygame.Rect(x + 12, row_y + 5, 14, 14)
+            pygame.draw.rect(self.screen, (220, 220, 220), box, 1)
+            fill_color = color if enabled else (90, 90, 110)
+            pygame.draw.rect(self.screen, fill_color, box.inflate(-2, -2))
+
+            if not enabled:
+                pygame.draw.line(
+                    self.screen, (220, 220, 220), box.topleft, box.bottomright, 2
+                )
+                pygame.draw.line(
+                    self.screen, (220, 220, 220), box.topright, box.bottomleft, 2
+                )
+
+            label_surface = self.font.render(label, True, (220, 220, 220))
+            self.screen.blit(label_surface, (x + 34, row_y + 2))
     
     def draw_grid(self):
         """Draw grid"""
@@ -313,6 +436,115 @@ class Visualizer:
             right = end - d * head_len - perp * head_w
             pygame.draw.line(self.screen, color, end_screen, self.world_to_screen(left), 3)
             pygame.draw.line(self.screen, color, end_screen, self.world_to_screen(right), 3)
+
+    def draw_human_clearance(
+        self,
+        human_pos: np.ndarray,
+        human_radius: Optional[float],
+        obs_obstacles: Optional[np.ndarray] = None,
+        obs_segment_obstacles: Optional[np.ndarray] = None,
+        warn_clearance: float = 0.2,
+    ):
+        """Visualize the minimum-distance (clearance) from the human to observed obstacles."""
+        if human_radius is None or human_radius <= 0:
+            return
+
+        human_pos = np.asarray(human_pos, dtype=np.float32)
+        hr = float(human_radius)
+        human_screen = self.world_to_screen(human_pos)
+
+        def clearance_color(clearance: float) -> tuple[int, int, int]:
+            if clearance < 0.0:
+                return self.COLORS["obstacle_obs"]
+            if clearance < warn_clearance:
+                return self.COLORS["clear_warn"]
+            return self.COLORS["clear_safe"]
+
+        def clearance_width(clearance: float) -> int:
+            if clearance < 0.0:
+                return 4
+            if clearance < warn_clearance:
+                return 3
+            return 2
+
+        if obs_obstacles is not None and len(obs_obstacles) > 0:
+            for obs in obs_obstacles:
+                if isinstance(obs, dict):
+                    ox = float(obs.get("x", 0.0))
+                    oy = float(obs.get("y", 0.0))
+                    r = float(obs.get("r", 0.0))
+                else:
+                    ox = float(obs[0])
+                    oy = float(obs[1])
+                    r = float(obs[2])
+                center = np.array([ox, oy], dtype=np.float32)
+                d = human_pos - center
+                dist = float(np.linalg.norm(d))
+                if dist < 1e-6:
+                    continue
+                dir_obs_to_h = d / dist
+                p_obs = center + dir_obs_to_h * float(r)
+                p_h = human_pos - dir_obs_to_h * hr
+                clearance = dist - float(r + hr)
+                color = clearance_color(clearance)
+                width = clearance_width(clearance)
+                pygame.draw.line(
+                    self.screen,
+                    color,
+                    self.world_to_screen(p_obs),
+                    self.world_to_screen(p_h),
+                    width,
+                )
+                pygame.draw.circle(self.screen, color, self.world_to_screen(p_obs), 4, 1)
+                pygame.draw.circle(self.screen, color, self.world_to_screen(p_h), 4, 1)
+
+        if obs_segment_obstacles is not None and len(obs_segment_obstacles) > 0:
+            for seg in obs_segment_obstacles:
+                if isinstance(seg, dict):
+                    if "p1" in seg and "p2" in seg:
+                        p1 = np.array(seg["p1"], dtype=np.float32)
+                        p2 = np.array(seg["p2"], dtype=np.float32)
+                    else:
+                        x1 = float(seg.get("x1", 0.0))
+                        y1 = float(seg.get("y1", 0.0))
+                        x2 = float(seg.get("x2", 0.0))
+                        y2 = float(seg.get("y2", 0.0))
+                        p1 = np.array([x1, y1], dtype=np.float32)
+                        p2 = np.array([x2, y2], dtype=np.float32)
+                else:
+                    p1 = np.array([seg[0], seg[1]], dtype=np.float32)
+                    p2 = np.array([seg[2], seg[3]], dtype=np.float32)
+
+                ab = p2 - p1
+                denom = float(np.dot(ab, ab))
+                if denom < 1e-12:
+                    closest = p1
+                else:
+                    t = float(np.dot(human_pos - p1, ab)) / denom
+                    t = float(np.clip(t, 0.0, 1.0))
+                    closest = p1 + t * ab
+
+                d = human_pos - closest
+                dist = float(np.linalg.norm(d))
+                if dist < 1e-6:
+                    continue
+                dir_wall_to_h = d / dist
+                p_h = human_pos - dir_wall_to_h * hr
+                clearance = dist - hr
+                color = clearance_color(clearance)
+                width = clearance_width(clearance)
+                pygame.draw.line(
+                    self.screen,
+                    color,
+                    self.world_to_screen(closest),
+                    self.world_to_screen(p_h),
+                    width,
+                )
+                pygame.draw.circle(self.screen, color, self.world_to_screen(closest), 4, 1)
+                pygame.draw.circle(self.screen, color, self.world_to_screen(p_h), 4, 1)
+
+        # A small center dot to make it easier to see which clearance vectors belong to human
+        pygame.draw.circle(self.screen, self.COLORS["human"], human_screen, 3)
     
     def draw_marker(self, position: np.ndarray, color: tuple, radius: int = 8, label: str = ""):
         """Draw marker point"""
@@ -519,65 +751,94 @@ class Visualizer:
         self.screen.fill(self.COLORS['background'])
         
         # Draw grid
-        self.draw_grid()
+        if self.layer_visibility.get("grid", True):
+            self.draw_grid()
         
         # Draw reference path
         if reference_path is not None and len(reference_path) > 0:
-            self.draw_path(reference_path, self.COLORS['path_ref'], 3)
+            if self.layer_visibility.get("reference_path", True):
+                self.draw_path(reference_path, self.COLORS['path_ref'], 3)
 
         # Draw obstacles
         if obstacles is not None and len(obstacles) > 0:
-            self.draw_obstacles(obstacles, obstacle_inflation)
+            if self.layer_visibility.get("obstacles", True):
+                self.draw_obstacles(obstacles, obstacle_inflation)
 
         # Draw segment obstacles
         if segment_obstacles is not None and len(segment_obstacles) > 0:
-            self.draw_segments(segment_obstacles, obstacle_inflation)
+            if self.layer_visibility.get("segment_obstacles", True):
+                self.draw_segments(segment_obstacles, obstacle_inflation)
 
         # Highlight obstacles used as observation
         if (
             (obs_obstacles is not None and len(obs_obstacles) > 0)
             or (obs_segment_obstacles is not None and len(obs_segment_obstacles) > 0)
         ):
-            self.draw_observation_obstacles(obs_obstacles, obs_segment_obstacles)
+            if self.layer_visibility.get("obs_obstacles", True):
+                self.draw_observation_obstacles(obs_obstacles, obs_segment_obstacles)
         if obs_segment_closest_points is not None and len(obs_segment_closest_points) > 0:
-            self.draw_observation_segment_vectors(
-                robot_pos, obs_segment_closest_points, obs_segment_dirs
+            if self.layer_visibility.get("obs_segment_vectors", True):
+                self.draw_observation_segment_vectors(
+                    robot_pos, obs_segment_closest_points, obs_segment_dirs
+                )
+        if (
+            human_radius is not None
+            and (
+                (obs_obstacles is not None and len(obs_obstacles) > 0)
+                or (obs_segment_obstacles is not None and len(obs_segment_obstacles) > 0)
             )
+        ):
+            if self.layer_visibility.get("human_clearance", True):
+                self.draw_human_clearance(
+                    human_pos=human_pos,
+                    human_radius=human_radius,
+                    obs_obstacles=obs_obstacles,
+                    obs_segment_obstacles=obs_segment_obstacles,
+                )
 
         # Draw planned path
         if planned_path is not None and len(planned_path) > 1:
-            self.draw_path(planned_path, self.COLORS['path_plan'], 2)
+            if self.layer_visibility.get("planned_path", True):
+                self.draw_path(planned_path, self.COLORS['path_plan'], 2)
 
         # Draw lookahead points
         if lookahead_points is not None and len(lookahead_points) > 0:
-            self.draw_points(lookahead_points, self.COLORS['lookahead'], 5)
+            if self.layer_visibility.get("lookahead_points", True):
+                self.draw_points(lookahead_points, self.COLORS['lookahead'], 5)
         
         # Draw trajectories
         if robot_trajectory is not None and len(robot_trajectory) > 1:
-            self.draw_path(np.array(robot_trajectory), self.COLORS['path_robot'], 2)
+            if self.layer_visibility.get("robot_trajectory", True):
+                self.draw_path(np.array(robot_trajectory), self.COLORS['path_robot'], 2)
         
         if human_trajectory is not None and len(human_trajectory) > 1:
-            self.draw_path(np.array(human_trajectory), self.COLORS['path_human'], 2)
+            if self.layer_visibility.get("human_trajectory", True):
+                self.draw_path(np.array(human_trajectory), self.COLORS['path_human'], 2)
         
         # Draw start and end markers
         if start_pos is not None:
-            self.draw_marker(start_pos, self.COLORS['start'], 10, "Start")
+            if self.layer_visibility.get("start_end", True):
+                self.draw_marker(start_pos, self.COLORS['start'], 10, "Start")
         
         if end_pos is not None:
-            self.draw_marker(end_pos, self.COLORS['end'], 10, "End")
+            if self.layer_visibility.get("start_end", True):
+                self.draw_marker(end_pos, self.COLORS['end'], 10, "End")
         
         # Draw leash
-        self.draw_leash(robot_pos, human_pos, leash_tension)
+        if self.layer_visibility.get("leash", True):
+            self.draw_leash(robot_pos, human_pos, leash_tension)
 
         # Draw human and robot
-        self.draw_radius(robot_pos, robot_radius, self.COLORS['robot_radius'])
-        self.draw_radius(human_pos, human_radius, self.COLORS['human_radius'])
+        if self.layer_visibility.get("agent_radii", True):
+            self.draw_radius(robot_pos, robot_radius, self.COLORS['robot_radius'])
+            self.draw_radius(human_pos, human_radius, self.COLORS['human_radius'])
         self.draw_human(human_pos)
         self.draw_robot(robot_pos, robot_heading)
         
         # Draw UI
         if info is not None:
             self.draw_ui(info)
+        self.draw_legend()
         
         # Update display (optional)
         if flip:
@@ -610,7 +871,7 @@ if __name__ == "__main__":
         for event in vis.get_events():
             if event.type == pygame.QUIT:
                 running = False
-            vis.handle_zoom(event)
+            vis.handle_event(event)
         
         # Simulate movement
         heading += 0.02

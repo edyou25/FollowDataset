@@ -151,8 +151,7 @@ class DataCollector:
             if event.type == pygame.QUIT:
                 self.running = False
             
-            # Handle mouse wheel zoom
-            self.visualizer.handle_zoom(event)
+            self.visualizer.handle_event(event)
             
             if event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:

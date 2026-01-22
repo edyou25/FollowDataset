@@ -101,8 +101,7 @@ class DatasetReplay:
             if event.type == pygame.QUIT:
                 self.running = False
             
-            # Handle zoom
-            self.visualizer.handle_zoom(event)
+            self.visualizer.handle_event(event)
             
             if event.type == pygame.KEYDOWN:
                 # Delete confirmation mode
