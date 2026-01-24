@@ -1,7 +1,15 @@
 """
 Visualization module - pygame real-time display
 """
-import pygame
+
+from __future__ import annotations
+
+try:
+    import pygame
+except ModuleNotFoundError as exc:
+    pygame = None  # type: ignore[assignment]
+    _PYGAME_IMPORT_ERROR = exc
+
 import numpy as np
 from typing import Optional
 
@@ -15,6 +23,7 @@ class Visualizer:
         'grid': (45, 45, 55),
         'path_ref': (80, 200, 120),      # Reference path - green
         'path_plan': (220, 200, 80),     # Planned path - yellow
+        'path_plan_opt': (170, 120, 255),# Optimized planned path - purple
         'lookahead': (255, 240, 120),    # Lookahead points - bright yellow
         'path_robot': (255, 100, 100),   # Robot trajectory - red
         'path_human': (100, 150, 255),   # Human trajectory - blue
@@ -46,6 +55,10 @@ class Visualizer:
         height: int = 1600,  # 从 800 增加到 1000
         pixels_per_meter: float = 12.0
     ):
+        if pygame is None:
+            raise ModuleNotFoundError(
+                "pygame is required for visualization. Install it (e.g. `pip install pygame`)."
+            ) from _PYGAME_IMPORT_ERROR
         self.width = width
         self.height = height
         self.ppm = pixels_per_meter  # Pixels per meter
@@ -67,6 +80,7 @@ class Visualizer:
             "grid": True,
             "reference_path": True,
             "planned_path": True,
+            "planned_path_opt": True,
             "lookahead_points": True,
             "robot_trajectory": True,
             "human_trajectory": True,
@@ -117,6 +131,7 @@ class Visualizer:
             {"key": "grid", "label": "Grid", "color": self.COLORS["grid"]},
             {"key": "reference_path", "label": "Ref Path", "color": self.COLORS["path_ref"]},
             {"key": "planned_path", "label": "Planned Path", "color": self.COLORS["path_plan"]},
+            {"key": "planned_path_opt", "label": "Planned Opt", "color": self.COLORS["path_plan_opt"]},
             {"key": "lookahead_points", "label": "Lookahead", "color": self.COLORS["lookahead"]},
             {"key": "robot_trajectory", "label": "Robot Trail", "color": self.COLORS["path_robot"]},
             {"key": "human_trajectory", "label": "Human Trail", "color": self.COLORS["path_human"]},
@@ -727,6 +742,7 @@ class Visualizer:
         robot_trajectory: Optional[np.ndarray] = None,
         human_trajectory: Optional[np.ndarray] = None,
         planned_path: Optional[np.ndarray] = None,
+        planned_path_opt: Optional[np.ndarray] = None,
         lookahead_points: Optional[np.ndarray] = None,
         obstacles: Optional[np.ndarray] = None,
         segment_obstacles: Optional[np.ndarray] = None,
@@ -800,6 +816,9 @@ class Visualizer:
         if planned_path is not None and len(planned_path) > 1:
             if self.layer_visibility.get("planned_path", True):
                 self.draw_path(planned_path, self.COLORS['path_plan'], 2)
+        if planned_path_opt is not None and len(planned_path_opt) > 1:
+            if self.layer_visibility.get("planned_path_opt", True):
+                self.draw_path(planned_path_opt, self.COLORS["path_plan_opt"], 2)
 
         # Draw lookahead points
         if lookahead_points is not None and len(lookahead_points) > 0:

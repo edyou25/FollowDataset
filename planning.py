@@ -4,16 +4,21 @@ Guide Dog Robot Planning Tool (model-based simulation)
 
 Controls:
     P     Toggle policy/manual control
+    O     Toggle residual RL (if provided)
     SPACE Pause/Resume
     R     Reset position
     N     Generate new path
     ESC   Exit
     Arrows Manual control (when policy disabled)
 """
+from __future__ import annotations
+
 import argparse
 import copy
 import json
 import importlib
+import math
+import os
 import sys
 from collections import deque
 from datetime import datetime
@@ -21,7 +26,11 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 import numpy as np
-import pygame
+os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
+try:
+    import pygame
+except ModuleNotFoundError:
+    pygame = None  # type: ignore[assignment]
 import torch
 import dill
 
@@ -40,6 +49,7 @@ if str(DIFFUSION_POLICY_DIR) not in sys.path:
 
 from src.path_generator import PathGenerator
 from src.physics import PhysicsEngine
+from src.rl_policy import ActorCritic
 from src.visualizer import Visualizer
 from src.scoring import TrajectoryScorer
 
@@ -105,6 +115,13 @@ class ModelPlanner:
         robot_speed: float = 1.5,
         fps: int = 20,
         inference_steps: int = 8,
+        rl_ckpt: Optional[Path] = None,
+        rl_device: str = "auto",
+        rl_residual_scale: Optional[float] = None,
+        rl_boost_margin: float = 0.0,
+        rl_boost_gain: float = 0.0,
+        rl_boost_max: float = 3.0,
+        rl_boost_horizon: Optional[int] = None,
         turn_gain: float = 1.2,
         curvature_slowdown: bool = True,
         curvature_scale: float = 0.7,
@@ -114,7 +131,9 @@ class ModelPlanner:
         visualizer: Optional[Visualizer] = None,
         create_visualizer: bool = True,
         collision_behavior: str = "reset",
+        verbose: bool = True,
     ):
+        self.verbose = bool(verbose)
         self.fps = fps
         self.sim_dt = 1.0 / fps
         self.leash_length = leash_length
@@ -126,6 +145,7 @@ class ModelPlanner:
             self.visualizer = Visualizer()
 
         # Load policy if checkpoint is provided
+        self.checkpoint_path = checkpoint_path
         self.device = resolve_device(device)
         self.workspace = None
         self.policy = None
@@ -139,8 +159,9 @@ class ModelPlanner:
             self.policy.eval()
         else:
             # No checkpoint - will use manual control only
-            print("Warning: No checkpoint provided. Running in manual control mode only.")
-            print("Press 'P' key is disabled. Use arrow keys for manual control.")
+            if self.verbose:
+                print("Warning: No checkpoint provided. Running in manual control mode only.")
+                print("Press 'P' key is disabled. Use arrow keys for manual control.")
 
         # Load configuration from checkpoint if available, otherwise use defaults
         if self.workspace is not None:
@@ -354,6 +375,7 @@ class ModelPlanner:
         self.robot_trajectory = []
         self.human_trajectory = []
         self.planned_path = None
+        self.planned_path_opt = None
         self.lookahead_world = None
         self.frame_count = 0
         self.prev_robot_pos = None
@@ -382,7 +404,30 @@ class ModelPlanner:
             original_steps = self.policy.num_inference_steps
             self.policy.num_inference_steps = inference_steps
             if original_steps != inference_steps:
-                print(f"Set inference steps to {inference_steps} (original: {original_steps}) for faster performance")
+                if self.verbose:
+                    print(
+                        f"Set inference steps to {inference_steps} (original: {original_steps}) "
+                        "for faster performance"
+                    )
+
+        self.residual_policy: Optional[ActorCritic] = None
+        self.residual_device = resolve_device(rl_device)
+        self.residual_scale = 0.0
+        self.use_residual = False
+        self.rl_boost_margin = float(rl_boost_margin)
+        self.rl_boost_gain = float(rl_boost_gain)
+        self.rl_boost_max = float(rl_boost_max)
+        self._rl_boost_horizon_from_cli = rl_boost_horizon is not None
+        self.rl_boost_horizon = max(1, int(rl_boost_horizon or 1))
+        self.current_residual_action: Optional[np.ndarray] = None
+        self.current_base_control: Optional[Tuple[float, float]] = None
+        self.current_residual_scale: float = 0.0
+        if rl_ckpt is not None:
+            rl_ckpt = Path(rl_ckpt)
+            if rl_ckpt.exists():
+                self._load_residual_policy(rl_ckpt, rl_device=rl_device, residual_scale=rl_residual_scale)
+            elif self.verbose:
+                print(f"[warn] RL checkpoint not found: {rl_ckpt} (residual disabled)")
 
         if log_path is not None:
             log_path = Path(log_path)
@@ -419,6 +464,12 @@ class ModelPlanner:
                     "curvature_slowdown": bool(self.curvature_slowdown),
                     "curvature_scale": float(self.curvature_scale),
                     "min_speed_scale": float(self.min_speed_scale),
+                    "rl_ckpt": str(rl_ckpt) if rl_ckpt is not None else None,
+                    "rl_residual_scale": float(self.residual_scale),
+                    "rl_boost_margin": float(self.rl_boost_margin),
+                    "rl_boost_gain": float(self.rl_boost_gain),
+                    "rl_boost_max": float(self.rl_boost_max),
+                    "rl_boost_horizon": int(self.rl_boost_horizon),
                 },
             )
 
@@ -448,7 +499,8 @@ class ModelPlanner:
                 "segment_obstacle_count": segment_count,
             },
         )
-        print(f"New path generated: length={self.current_path_data['length']:.1f}m")
+        if self.verbose:
+            print(f"New path generated: length={self.current_path_data['length']:.1f}m")
 
     def _reset_position(self):
         """Reset to start position."""
@@ -467,6 +519,7 @@ class ModelPlanner:
         self.robot_trajectory = []
         self.human_trajectory = []
         self.planned_path = None
+        self.planned_path_opt = None
         self.frame_count = 0
         self.prev_robot_pos = None
         self._seed_obs_history(self.physics.robot.position, self.physics.human.position)
@@ -534,10 +587,18 @@ class ModelPlanner:
             "forward": float(forward),
             "turn": float(turn),
             "speed_scale": float(self.current_speed_scale),
+            "residual_scale": float(self.current_residual_scale),
             "use_policy": bool(self.use_policy),
             "paused": bool(self.paused),
             "scores": scores,
         }
+        if self.current_base_control is not None:
+            payload["base_control"] = [float(self.current_base_control[0]), float(self.current_base_control[1])]
+        if self.current_residual_action is not None:
+            payload["residual_action"] = [
+                float(self.current_residual_action[0]),
+                float(self.current_residual_action[1]),
+            ]
         if self.robot_frame:
             rel = human_state.position - robot_state.position
             cos_h = float(np.cos(robot_state.heading))
@@ -578,9 +639,18 @@ class ModelPlanner:
                         mode = "policy" if self.use_policy else "manual"
                     else:
                         mode = "manual (no checkpoint)"
-                    print(f"Control mode: {mode}")
+                    if self.verbose:
+                        print(f"Control mode: {mode}")
+                elif event.key == pygame.K_o:
+                    if self.residual_policy is None:
+                        continue
+                    self.use_residual = not bool(self.use_residual)
+                    if self.verbose:
+                        print(f"Residual RL: {'ON' if self.use_residual else 'OFF'}")
 
     def _get_manual_control(self) -> Tuple[float, float]:
+        if pygame is None:
+            return 0.0, 0.0
         keys = pygame.key.get_pressed()
         forward = 0.0
         turn = 0.0
@@ -606,6 +676,80 @@ class ModelPlanner:
             action_dict = self.policy.predict_action(obs_dict)
         action_seq = action_dict["action"].detach().cpu().numpy()[0]
         return action_seq.astype(np.float32)
+
+    def _load_residual_policy(
+        self,
+        ckpt_path: Path,
+        *,
+        rl_device: str = "auto",
+        residual_scale: Optional[float] = None,
+    ):
+        ckpt = torch.load(ckpt_path.open("rb"), map_location="cpu")
+        if not isinstance(ckpt, dict):
+            raise ValueError(f"Unexpected RL checkpoint format: {type(ckpt)}")
+        obs_dim = int(ckpt.get("obs_dim", 0))
+        hidden_dim = int(ckpt.get("hidden_dim", 256))
+        env_cfg = ckpt.get("env_cfg", {})
+        init_log_std = float(env_cfg.get("init_log_std", 0.0)) if isinstance(env_cfg, dict) else 0.0
+
+        if obs_dim <= 0:
+            raise ValueError("RL checkpoint missing/invalid obs_dim")
+        if "state_dict" not in ckpt:
+            raise ValueError("RL checkpoint missing state_dict")
+
+        policy = ActorCritic(
+            obs_dim=obs_dim,
+            hidden_dim=hidden_dim,
+            action_dim=2,
+            init_log_std=init_log_std,
+        )
+        policy.load_state_dict(ckpt["state_dict"])
+
+        self.residual_device = resolve_device(rl_device)
+        policy.to(self.residual_device)
+        policy.eval()
+
+        scale = float(env_cfg.get("residual_scale", 0.25)) if isinstance(env_cfg, dict) else 0.25
+        if residual_scale is not None:
+            scale = float(residual_scale)
+
+        self.residual_policy = policy
+        self.residual_scale = scale
+        self.use_residual = True
+        if isinstance(env_cfg, dict):
+            if self.rl_boost_margin == 0.0:
+                self.rl_boost_margin = float(env_cfg.get("residual_boost_margin", self.rl_boost_margin))
+            if self.rl_boost_gain == 0.0:
+                self.rl_boost_gain = float(env_cfg.get("residual_boost_gain", self.rl_boost_gain))
+            if self.rl_boost_max == 3.0:
+                self.rl_boost_max = float(env_cfg.get("residual_boost_max", self.rl_boost_max))
+            if not bool(getattr(self, "_rl_boost_horizon_from_cli", False)):
+                self.rl_boost_horizon = max(
+                    1, int(env_cfg.get("residual_boost_horizon", self.rl_boost_horizon))
+                )
+
+        expected_dim = int(self.n_obs_steps) * int(self.obs_dim)
+        if expected_dim > 0 and obs_dim != expected_dim and self.verbose:
+            print(f"[warn] RL obs_dim={obs_dim} != expected {expected_dim} (n_obs_steps*obs_dim)")
+
+        base_ckpt = env_cfg.get("base_ckpt") if isinstance(env_cfg, dict) else None
+        if base_ckpt and self.checkpoint_path is not None and self.verbose:
+            if str(self.checkpoint_path) != str(base_ckpt):
+                print(f"[warn] RL was trained with base_ckpt={base_ckpt}, but planning uses ckpt={self.checkpoint_path}")
+
+        if self.verbose:
+            print(f"Loaded residual RL: {ckpt_path} | scale={self.residual_scale:.3f} | device={self.residual_device}")
+
+    def _predict_residual_action(self) -> Optional[np.ndarray]:
+        if self.residual_policy is None:
+            return None
+        if len(self.obs_history) == 0:
+            return None
+        obs_seq = np.stack(self.obs_history, axis=0).astype(np.float32)
+        obs_flat = obs_seq.reshape(1, -1)
+        obs_tensor = torch.from_numpy(obs_flat).to(self.residual_device, dtype=torch.float32)
+        action = self.residual_policy.act_deterministic(obs_tensor)[0].detach().cpu().numpy().astype(np.float32)
+        return action
 
     def _build_obs(
         self, robot_pos: np.ndarray, human_pos: np.ndarray, heading: float
@@ -937,6 +1081,83 @@ class ModelPlanner:
         diff = point - closest
         return float(np.dot(diff, diff))
 
+    def _min_clearance_to_obstacles(
+        self,
+        point: np.ndarray,
+        *,
+        agent_radius: float,
+        obstacles,
+        segment_obstacles,
+    ) -> float:
+        min_clearance = float("inf")
+        if obstacles is not None and len(obstacles) > 0:
+            for obs in obstacles:
+                if isinstance(obs, dict):
+                    ox = float(obs.get("x", 0.0))
+                    oy = float(obs.get("y", 0.0))
+                    radius = float(obs.get("r", 0.0))
+                else:
+                    ox = float(obs[0])
+                    oy = float(obs[1])
+                    radius = float(obs[2])
+                dx = float(point[0] - ox)
+                dy = float(point[1] - oy)
+                dist = math.sqrt(dx * dx + dy * dy)
+                clearance = dist - (radius + float(agent_radius))
+                if clearance < min_clearance:
+                    min_clearance = clearance
+
+        if segment_obstacles is not None and len(segment_obstacles) > 0:
+            for seg in segment_obstacles:
+                if isinstance(seg, dict):
+                    if "p1" in seg and "p2" in seg:
+                        p1 = np.array(seg["p1"], dtype=np.float32)
+                        p2 = np.array(seg["p2"], dtype=np.float32)
+                    else:
+                        p1 = np.array([seg.get("x1", 0.0), seg.get("y1", 0.0)], dtype=np.float32)
+                        p2 = np.array([seg.get("x2", 0.0), seg.get("y2", 0.0)], dtype=np.float32)
+                else:
+                    p1 = np.array([seg[0], seg[1]], dtype=np.float32)
+                    p2 = np.array([seg[2], seg[3]], dtype=np.float32)
+                dist_sq = self._point_segment_dist_sq(point.astype(np.float32), p1, p2)
+                dist = math.sqrt(dist_sq)
+                clearance = dist - float(agent_radius)
+                if clearance < min_clearance:
+                    min_clearance = clearance
+
+        return float(min_clearance)
+
+    def _predict_min_clearance(self, forward: float, turn: float) -> float:
+        if self.current_path_data is None:
+            return float("inf")
+        obstacles = self.current_path_data.get("obstacles")
+        segments = self.current_path_data.get("segment_obstacles")
+        if (obstacles is None or len(obstacles) == 0) and (segments is None or len(segments) == 0):
+            return float("inf")
+
+        sim = copy.deepcopy(self.physics)
+        sim.set_control(float(forward), float(turn))
+        min_clear = float("inf")
+        n_steps = int(self.frame_stride) * int(max(1, int(self.rl_boost_horizon)))
+        for _ in range(n_steps):
+            robot_state, human_state = sim.step()
+            min_clear = min(
+                min_clear,
+                self._min_clearance_to_obstacles(
+                    robot_state.position,
+                    agent_radius=float(sim.robot_radius),
+                    obstacles=obstacles,
+                    segment_obstacles=segments,
+                ),
+                self._min_clearance_to_obstacles(
+                    human_state.position,
+                    agent_radius=float(sim.human_radius),
+                    obstacles=obstacles,
+                    segment_obstacles=segments,
+                ),
+            )
+        return float(min_clear)
+
     def _segments_closest_points_and_dirs(
         self,
         robot_pos: np.ndarray,
@@ -1037,6 +1258,82 @@ class ModelPlanner:
             points = robot_pos[None, :] + np.cumsum(action_seq * self.data_dt, axis=0)
         return points
 
+    def _actions_to_path_with_residual(
+        self,
+        robot_pos: np.ndarray,
+        action_seq: np.ndarray,
+        residual_action: np.ndarray,
+    ) -> Optional[np.ndarray]:
+        if action_seq.size == 0:
+            return None
+        if residual_action is None or len(residual_action) < 2:
+            return None
+
+        sim = copy.deepcopy(self.physics)
+        sim.robot.position = robot_pos.astype(np.float32).copy()
+        points = []
+        obstacles = self.current_path_data.get("obstacles") if self.current_path_data else None
+        segments = self.current_path_data.get("segment_obstacles") if self.current_path_data else None
+
+        dr0 = float(self.residual_scale) * float(residual_action[0])
+        dr1 = float(self.residual_scale) * float(residual_action[1])
+
+        for act in action_seq:
+            if self.action_mode == "forward_heading":
+                forward_delta = float(act[0])
+                heading_delta = float(act[1])
+
+                turn_speed = float(sim.turn_speed)
+                robot_speed = float(sim.robot_speed)
+                turn_delta = heading_delta * float(self.turn_gain)
+                base_turn = turn_delta / (turn_speed * self.data_dt) if turn_speed > 0 else 0.0
+                base_forward = forward_delta / (robot_speed * self.data_dt) if robot_speed > 0 else 0.0
+
+                if self.curvature_slowdown and turn_speed > 0:
+                    max_turn = turn_speed * self.data_dt
+                    if max_turn > 1e-6:
+                        ratio = min(1.0, abs(turn_delta) / max_turn)
+                        speed_scale = max(
+                            float(self.min_speed_scale),
+                            1.0 - float(self.curvature_scale) * ratio,
+                        )
+                        base_forward *= speed_scale
+
+                base_forward = float(np.clip(base_forward, -1.0, 1.0))
+                base_turn = float(np.clip(base_turn, -1.0, 1.0))
+            else:
+                if self.action_mode == "delta":
+                    delta = np.asarray(act, dtype=np.float32)
+                elif self.action_mode == "position":
+                    delta = np.asarray(act, dtype=np.float32) - sim.robot.position.astype(np.float32)
+                else:
+                    delta = np.asarray(act, dtype=np.float32) * float(self.data_dt)
+
+                if self.robot_frame:
+                    cos_h = float(np.cos(sim.robot.heading))
+                    sin_h = float(np.sin(sim.robot.heading))
+                    dx = cos_h * float(delta[0]) - sin_h * float(delta[1])
+                    dy = sin_h * float(delta[0]) + cos_h * float(delta[1])
+                    delta = np.array([dx, dy], dtype=np.float32)
+
+                base_forward, base_turn = self._delta_to_control(
+                    delta, sim.robot.heading, dt=self.data_dt
+                )
+
+            forward = float(np.clip(base_forward + dr0, -1.0, 1.0))
+            turn = float(np.clip(base_turn + dr1, -1.0, 1.0))
+            sim.set_control(forward, turn)
+
+            for _ in range(int(self.frame_stride)):
+                robot_state, _human_state = sim.step()
+                points.append(robot_state.position.copy())
+                if obstacles is not None or segments is not None:
+                    collided, _info = sim.check_collision(obstacles, segment_obstacles=segments)
+                    if collided:
+                        return np.stack(points, axis=0) if points else None
+
+        return np.stack(points, axis=0) if points else None
+
     def _action_to_delta(self, action: np.ndarray, robot_pos: np.ndarray) -> np.ndarray:
         if self.action_mode == "forward_heading":
             forward = float(action[0])
@@ -1111,6 +1408,17 @@ class ModelPlanner:
                         self.planned_path = self._actions_to_path(
                             self.physics.robot.position, action_seq
                         )
+                        if self.residual_policy is not None:
+                            residual_action = self._predict_residual_action()
+                            self.current_residual_action = residual_action
+                            if residual_action is not None:
+                                self.planned_path_opt = self._actions_to_path_with_residual(
+                                    self.physics.robot.position, action_seq, residual_action
+                                )
+                            else:
+                                self.planned_path_opt = None
+                        else:
+                            self.planned_path_opt = None
                         if self.cached_action_seq is not None and len(self.cached_action_seq) > 0:
                             norms = np.linalg.norm(self.cached_action_seq, axis=1)
                             self._log_event(
@@ -1163,6 +1471,38 @@ class ModelPlanner:
                             delta, self.physics.robot.heading, dt=self.data_dt
                         )
                         self.current_speed_scale = 1.0
+                    self.current_base_control = (float(forward), float(turn))
+                    if self.residual_policy is not None:
+                        residual_action = self._predict_residual_action()
+                        self.current_residual_action = residual_action
+                        if self.use_residual and residual_action is not None:
+                            residual_scale = float(self.residual_scale)
+                            if self.rl_boost_gain > 0.0 and self.rl_boost_margin > 0.0:
+                                clearance = self._predict_min_clearance(forward, turn)
+                                if math.isfinite(clearance):
+                                    violation = max(0.0, float(self.rl_boost_margin) - float(clearance))
+                                else:
+                                    violation = 0.0
+                                boost = 1.0 + float(self.rl_boost_gain) * (violation / float(self.rl_boost_margin))
+                                boost = min(float(self.rl_boost_max), max(1.0, float(boost)))
+                                residual_scale = residual_scale * boost
+                            self.current_residual_scale = float(residual_scale)
+                            forward = float(
+                                np.clip(
+                                    float(forward) + float(residual_scale) * float(residual_action[0]),
+                                    -1.0,
+                                    1.0,
+                                )
+                            )
+                            turn = float(
+                                np.clip(
+                                    float(turn) + float(residual_scale) * float(residual_action[1]),
+                                    -1.0,
+                                    1.0,
+                                )
+                            )
+                        else:
+                            self.current_residual_scale = 0.0
                     self.current_delta = delta
                     self.cached_control = (forward, turn)
                 else:
@@ -1172,6 +1512,7 @@ class ModelPlanner:
             else:
                 forward, turn = self._get_manual_control()
                 self.planned_path = None
+                self.planned_path_opt = None
                 # Reset cache when switching to manual
                 self.cached_action_seq = None
                 self.cached_action_idx = 0
@@ -1211,7 +1552,11 @@ class ModelPlanner:
                                 "s_end": float(s_end),
                             },
                         )
-                        print("Human reached end of path. Simulation paused (SPACE to resume, N for new path).")
+                        if self.verbose:
+                            print(
+                                "Human reached end of path. Simulation paused "
+                                "(SPACE to resume, N for new path)."
+                            )
 
         self.robot_trajectory.append(robot_state.position.copy())
         self.human_trajectory.append(human_state.position.copy())
@@ -1260,11 +1605,13 @@ class ModelPlanner:
             )
             label = obs_type or "obstacle"
             if self.collision_behavior == "pause":
-                print(f"Collision detected ({who}, {label} {idx}), pausing at collision.")
+                if self.verbose:
+                    print(f"Collision detected ({who}, {label} {idx}), pausing at collision.")
                 self.collision_pause = True
                 self.physics.set_control(0.0, 0.0)
                 return True
-            print(f"Collision detected ({who}, {label} {idx}), resetting.")
+            if self.verbose:
+                print(f"Collision detected ({who}, {label} {idx}), resetting.")
             self._reset_position()
             return True
         return False
@@ -1272,10 +1619,24 @@ class ModelPlanner:
     def _render(self, robot_state, human_state, actual_fps: float):
         scores = self.scorer.get_scores() if self.scorer else {}
         mode = "policy" if self.use_policy else "manual"
+        if self.use_policy and self.residual_policy is not None:
+            mode = "policy+rl" if self.use_residual else "policy (base)"
         if self.paused:
             mode += " (paused)"
         elif self.collision_pause:
             mode += " (collision)"
+
+        controls = [
+            "P: Policy/Manual",
+            "SPACE: Pause",
+            "R: Reset",
+            "N: New Path",
+            "Arrows: Manual control",
+            "Scroll: Zoom",
+            "ESC: Exit",
+        ]
+        if self.residual_policy is not None:
+            controls.insert(1, "O: Toggle residual RL")
 
         info = {
             "fps": actual_fps,
@@ -1288,15 +1649,7 @@ class ModelPlanner:
             "mode": mode,
             "robot_radius": self.physics.robot_radius,
             "human_radius": self.physics.human_radius,
-            "controls": [
-                "P: Policy/Manual",
-                "SPACE: Pause",
-                "R: Reset",
-                "N: New Path",
-                "Arrows: Manual control",
-                "Scroll: Zoom",
-                "ESC: Exit",
-            ],
+            "controls": controls,
         }
 
         obs_obstacles, obs_segment_obstacles = self._select_obstacles_for_observation(
@@ -1313,6 +1666,7 @@ class ModelPlanner:
             robot_trajectory=self.robot_trajectory,
             human_trajectory=self.human_trajectory,
             planned_path=self.planned_path,
+            planned_path_opt=self.planned_path_opt,
             lookahead_points=self.lookahead_world,
             obstacles=self.current_path_data.get("obstacles") if self.current_path_data else None,
             segment_obstacles=self.current_path_data.get("segment_obstacles") if self.current_path_data else None,
@@ -1338,7 +1692,8 @@ class ModelPlanner:
         print("=" * 60)
         print("Guide Dog Robot Planning Tool")
         print("=" * 60)
-        print("Controls: P=Policy/Manual | SPACE=Pause | R=Reset | N=NewPath | ESC=Exit")
+        extra = " | O=ResidualRL" if self.residual_policy is not None else ""
+        print(f"Controls: P=Policy/Manual{extra} | SPACE=Pause | R=Reset | N=NewPath | ESC=Exit")
         print("=" * 60)
 
         while self.running:
@@ -1359,7 +1714,10 @@ def main():
     
     # Default checkpoint path - use latest available checkpoint
     default_ckpt = Path(
-        "/home/yyf/IROS2026/diffusion_policy/data/outputs/2026.01.21/15.00.42_train_diffusion_transformer_lowdim_guide_guide_lowdim/checkpoints/epoch=2090-test_mean_score=0.622.ckpt"
+        "/home/yyf/IROS2026/diffusion_policy/data/outputs/2026.01.21/14.14.46_train_diffusion_unet_lowdim_guide_guide_lowdim/checkpoints/epoch=0090-test_mean_score=0.630.ckpt"
+    )
+    default_rl_ckpt = Path(
+        "/home/yyf/IROS2026/FollowDataset/rl_models/ppo_20260123_165256.pt"
     )
     
     parser.add_argument(
@@ -1395,6 +1753,43 @@ def main():
     parser.add_argument("--fps", type=int, default=20)
     parser.add_argument("--inference-steps", type=int, default=64,
                         help="Number of diffusion inference steps (lower=faster, default=64)")
+    parser.add_argument(
+        "--rl-ckpt",
+        type=Path,
+        default=default_rl_ckpt,
+        help="Optional PPO residual checkpoint (.pt). Press O to toggle base vs base+RL.",
+    )
+    parser.add_argument("--rl-device", default="auto", help="cpu, cuda:0, or auto (for residual RL)")
+    parser.add_argument(
+        "--rl-residual-scale",
+        type=float,
+        default=None,
+        help="Override residual_scale stored in the PPO checkpoint.",
+    )
+    parser.add_argument(
+        "--rl-boost-margin",
+        type=float,
+        default=0.0,
+        help="When >0, boost residual_scale if predicted clearance falls below this margin (m).",
+    )
+    parser.add_argument(
+        "--rl-boost-gain",
+        type=float,
+        default=0.0,
+        help="Boost factor slope for residual_scale near obstacles (0 disables boosting).",
+    )
+    parser.add_argument(
+        "--rl-boost-max",
+        type=float,
+        default=3.0,
+        help="Upper bound on the residual_scale boost multiplier.",
+    )
+    parser.add_argument(
+        "--rl-boost-horizon",
+        type=int,
+        default=None,
+        help="Predict clearance over this many future control steps when boosting (default: load from RL ckpt env_cfg or 1).",
+    )
     parser.add_argument(
         "--turn-gain",
         type=float,
@@ -1457,6 +1852,13 @@ def main():
         robot_speed=args.robot_speed,
         fps=args.fps,
         inference_steps=args.inference_steps,
+        rl_ckpt=args.rl_ckpt,
+        rl_device=args.rl_device,
+        rl_residual_scale=args.rl_residual_scale,
+        rl_boost_margin=args.rl_boost_margin,
+        rl_boost_gain=args.rl_boost_gain,
+        rl_boost_max=args.rl_boost_max,
+        rl_boost_horizon=args.rl_boost_horizon,
         turn_gain=args.turn_gain,
         curvature_slowdown=not args.no_curvature_slowdown,
         curvature_scale=args.curvature_scale,
