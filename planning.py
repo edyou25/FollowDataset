@@ -1359,7 +1359,7 @@ def main():
     
     # Default checkpoint path - use latest available checkpoint
     default_ckpt = Path(
-        "/home/yyf/IROS2026/diffusion_policy/data/outputs/2026.01.21/15.00.42_train_diffusion_transformer_lowdim_guide_guide_lowdim/checkpoints/epoch=2090-test_mean_score=0.622.ckpt"
+        "/home/yyf/IROS2026/diffusion_policy/data/outputs/2026.01.21/14.14.46_train_diffusion_unet_lowdim_guide_guide_lowdim/checkpoints/epoch=0090-test_mean_score=0.630.ckpt"
     )
     
     parser.add_argument(
