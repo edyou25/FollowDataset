@@ -1,5 +1,6 @@
 # Data
 data/
+rl_models/
 
 # Python
 __pycache__/
