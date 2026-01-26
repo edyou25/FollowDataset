@@ -122,6 +122,7 @@ class ModelPlanner:
         rl_boost_gain: float = 0.0,
         rl_boost_max: float = 3.0,
         rl_boost_horizon: Optional[int] = None,
+        no_reverse: Optional[bool] = None,
         turn_gain: float = 1.2,
         curvature_slowdown: bool = True,
         curvature_scale: float = 0.7,
@@ -137,6 +138,8 @@ class ModelPlanner:
         self.fps = fps
         self.sim_dt = 1.0 / fps
         self.leash_length = leash_length
+        self._no_reverse_override = no_reverse
+        self.no_reverse = False if no_reverse is None else bool(no_reverse)
 
         # Initialize modules
         self.path_generator = PathGenerator(target_length=path_length)
@@ -419,6 +422,7 @@ class ModelPlanner:
         self.rl_boost_max = float(rl_boost_max)
         self._rl_boost_horizon_from_cli = rl_boost_horizon is not None
         self.rl_boost_horizon = max(1, int(rl_boost_horizon or 1))
+        self.residual_clearance_margin: Optional[float] = None
         self.current_residual_action: Optional[np.ndarray] = None
         self.current_base_control: Optional[Tuple[float, float]] = None
         self.current_residual_scale: float = 0.0
@@ -727,10 +731,19 @@ class ModelPlanner:
                 self.rl_boost_horizon = max(
                     1, int(env_cfg.get("residual_boost_horizon", self.rl_boost_horizon))
                 )
+            if self._no_reverse_override is None:
+                self.no_reverse = bool(env_cfg.get("no_reverse", self.no_reverse))
+            reward_cfg = env_cfg.get("reward")
+            if isinstance(reward_cfg, dict):
+                clearance_margin = reward_cfg.get("clearance_margin")
+                if clearance_margin is not None:
+                    self.residual_clearance_margin = float(clearance_margin)
 
         expected_dim = int(self.n_obs_steps) * int(self.obs_dim)
-        if expected_dim > 0 and obs_dim != expected_dim and self.verbose:
-            print(f"[warn] RL obs_dim={obs_dim} != expected {expected_dim} (n_obs_steps*obs_dim)")
+        if expected_dim > 0 and obs_dim not in (expected_dim, expected_dim + 7) and self.verbose:
+            print(
+                f"[warn] RL obs_dim={obs_dim} != expected {expected_dim} (base) or {expected_dim + 7} (base+aug)"
+            )
 
         base_ckpt = env_cfg.get("base_ckpt") if isinstance(env_cfg, dict) else None
         if base_ckpt and self.checkpoint_path is not None and self.verbose:
@@ -747,9 +760,162 @@ class ModelPlanner:
             return None
         obs_seq = np.stack(self.obs_history, axis=0).astype(np.float32)
         obs_flat = obs_seq.reshape(1, -1)
+
+        # Backward compatible: if RL expects augmented obs, append safety features.
+        expected_base_dim = int(self.n_obs_steps) * int(self.obs_dim)
+        ckpt_obs_dim = int(getattr(self.residual_policy, "obs_dim", obs_flat.shape[1]))
+        if ckpt_obs_dim == expected_base_dim + 7:
+            aug = self._build_residual_aug_features()
+            obs_flat = np.concatenate([obs_flat, aug.reshape(1, -1)], axis=1).astype(np.float32)
+        elif ckpt_obs_dim == expected_base_dim:
+            pass
+        else:
+            # Keep running even if mismatch (helps debugging) by padding/truncating to ckpt dim.
+            if self.verbose and not hasattr(self, "_warned_residual_obs_dim"):
+                setattr(self, "_warned_residual_obs_dim", True)
+                print(
+                    f"[warn] residual obs_dim={ckpt_obs_dim} doesn't match base({expected_base_dim}) "
+                    "or base+aug(7); padding/truncating observation to fit."
+                )
+            cur_dim = int(obs_flat.shape[1])
+            if ckpt_obs_dim < cur_dim:
+                obs_flat = obs_flat[:, :ckpt_obs_dim].astype(np.float32)
+            elif ckpt_obs_dim > cur_dim:
+                pad = np.zeros((1, ckpt_obs_dim - cur_dim), dtype=np.float32)
+                obs_flat = np.concatenate([obs_flat.astype(np.float32), pad], axis=1)
         obs_tensor = torch.from_numpy(obs_flat).to(self.residual_device, dtype=torch.float32)
         action = self.residual_policy.act_deterministic(obs_tensor)[0].detach().cpu().numpy().astype(np.float32)
         return action
+
+    def _build_residual_aug_features(self) -> np.ndarray:
+        """
+        Must match GuideFollowEnv._build_residual_aug_features() layout (7 dims).
+        Uses current state + current_base_control to provide early collision cues.
+        """
+        if self.current_path_data is None:
+            return np.zeros((7,), dtype=np.float32)
+        obstacles = self.current_path_data.get("obstacles")
+        segments = self.current_path_data.get("segment_obstacles")
+
+        clearance_now = float(
+            min(
+                self._min_clearance_to_obstacles(
+                    self.physics.robot.position,
+                    agent_radius=float(self.physics.robot_radius),
+                    obstacles=obstacles,
+                    segment_obstacles=segments,
+                ),
+                self._min_clearance_to_obstacles(
+                    self.physics.human.position,
+                    agent_radius=float(self.physics.human_radius),
+                    obstacles=obstacles,
+                    segment_obstacles=segments,
+                ),
+            )
+        )
+        if self.residual_clearance_margin is not None:
+            margin = float(self.residual_clearance_margin)
+        else:
+            margin = float(self.rl_boost_margin) if self.rl_boost_margin > 0.0 else 0.3
+        violation_now = float(max(0.0, margin - clearance_now))
+
+        base_forward = 0.0
+        base_turn = 0.0
+        clearance_base = float("inf")
+        if self.current_base_control is not None:
+            base_forward, base_turn = self.current_base_control
+            clearance_base = self._predict_min_clearance(float(base_forward), float(base_turn))
+
+        # Most-dangerous obstacle (closest to robot or human), expressed as vector from robot to obstacle point.
+        robot_pos = self.physics.robot.position.astype(np.float32)
+        human_pos = self.physics.human.position.astype(np.float32)
+        heading = float(self.physics.robot.heading)
+        rr = float(self.physics.robot_radius)
+        hr = float(self.physics.human_radius)
+
+        best_clear = float("inf")
+        best_point: Optional[np.ndarray] = None
+        agents = (
+            (robot_pos, rr),
+            (human_pos, hr),
+        )
+
+        if obstacles is not None and len(obstacles) > 0:
+            for obs in obstacles:
+                if isinstance(obs, dict):
+                    ox = float(obs.get("x", 0.0))
+                    oy = float(obs.get("y", 0.0))
+                    radius = float(obs.get("r", 0.0))
+                else:
+                    ox = float(obs[0])
+                    oy = float(obs[1])
+                    radius = float(obs[2])
+                center = np.array([ox, oy], dtype=np.float32)
+                r_obs = float(radius)
+                for agent_pos, agent_r in agents:
+                    vec_ca = agent_pos - center
+                    dist = float(np.linalg.norm(vec_ca))
+                    clear = dist - (r_obs + float(agent_r))
+                    if clear < best_clear:
+                        if dist > 1e-6:
+                            dir_ca = (vec_ca / dist).astype(np.float32)
+                        else:
+                            dir_ca = np.array([1.0, 0.0], dtype=np.float32)
+                        boundary = center + dir_ca * r_obs
+                        best_clear = clear
+                        best_point = boundary
+
+        if segments is not None and len(segments) > 0:
+            for seg in segments:
+                if isinstance(seg, dict):
+                    if "p1" in seg and "p2" in seg:
+                        p1 = np.array(seg["p1"], dtype=np.float32)
+                        p2 = np.array(seg["p2"], dtype=np.float32)
+                    else:
+                        p1 = np.array([seg.get("x1", 0.0), seg.get("y1", 0.0)], dtype=np.float32)
+                        p2 = np.array([seg.get("x2", 0.0), seg.get("y2", 0.0)], dtype=np.float32)
+                else:
+                    p1 = np.array([seg[0], seg[1]], dtype=np.float32)
+                    p2 = np.array([seg[2], seg[3]], dtype=np.float32)
+                ab = p2 - p1
+                denom = float(np.dot(ab, ab))
+                for agent_pos, agent_r in agents:
+                    if denom < 1e-12:
+                        closest = p1
+                    else:
+                        t_proj = float(np.dot(agent_pos - p1, ab)) / denom
+                        t_proj = float(np.clip(t_proj, 0.0, 1.0))
+                        closest = p1 + t_proj * ab
+                    diff = agent_pos - closest
+                    dist_sq = float(np.dot(diff, diff))
+                    dist = float(np.sqrt(dist_sq))
+                    clear = dist - float(agent_r)
+                    if clear < best_clear:
+                        best_clear = clear
+                        best_point = closest
+
+        if best_point is None:
+            vec_rf = np.zeros((2,), dtype=np.float32)
+        else:
+            vec_world = (best_point - robot_pos).astype(np.float32)
+            cos_h = float(np.cos(heading))
+            sin_h = float(np.sin(heading))
+            vx = cos_h * float(vec_world[0]) + sin_h * float(vec_world[1])
+            vy = -sin_h * float(vec_world[0]) + cos_h * float(vec_world[1])
+            vec_rf = np.clip(np.array([vx, vy], dtype=np.float32), -5.0, 5.0)
+
+        return np.array(
+            [
+                float(np.clip(clearance_now, -10.0, 10.0)),
+                float(np.clip(violation_now, 0.0, 10.0)),
+                float(np.clip(clearance_base, -10.0, 10.0)),
+                float(np.clip(base_forward, -1.0, 1.0)),
+                float(np.clip(base_turn, -1.0, 1.0)),
+                float(vec_rf[0]),
+                float(vec_rf[1]),
+            ],
+            dtype=np.float32,
+        )
 
     def _build_obs(
         self, robot_pos: np.ndarray, human_pos: np.ndarray, heading: float
@@ -1503,6 +1669,8 @@ class ModelPlanner:
                             )
                         else:
                             self.current_residual_scale = 0.0
+                    if self.no_reverse:
+                        forward = max(0.0, float(forward))
                     self.current_delta = delta
                     self.cached_control = (forward, turn)
                 else:
@@ -1511,6 +1679,8 @@ class ModelPlanner:
                     delta = self.current_delta
             else:
                 forward, turn = self._get_manual_control()
+                if self.no_reverse:
+                    forward = max(0.0, float(forward))
                 self.planned_path = None
                 self.planned_path_opt = None
                 # Reset cache when switching to manual
@@ -1522,6 +1692,8 @@ class ModelPlanner:
                 self.current_delta = None
                 self.current_speed_scale = 1.0
 
+        if self.no_reverse:
+            forward = max(0.0, float(forward))
         self.physics.set_control(forward, turn)
         robot_state, human_state = self.physics.step()
 
@@ -1717,7 +1889,7 @@ def main():
         "/home/yyf/IROS2026/diffusion_policy/data/outputs/2026.01.21/14.14.46_train_diffusion_unet_lowdim_guide_guide_lowdim/checkpoints/epoch=0090-test_mean_score=0.630.ckpt"
     )
     default_rl_ckpt = Path(
-        "/home/yyf/IROS2026/FollowDataset/rl_models/ppo_20260123_165256.pt"
+        "/home/yyf/IROS2026/FollowDataset/rl_models/ppo_20260126_145946.pt"
     )
     
     parser.add_argument(
@@ -1790,6 +1962,13 @@ def main():
         default=None,
         help="Predict clearance over this many future control steps when boosting (default: load from RL ckpt env_cfg or 1).",
     )
+    reverse_group = parser.add_mutually_exclusive_group()
+    reverse_group.add_argument("--no-reverse", action="store_true", help="Clamp forward control to >=0 (disallow reversing).")
+    reverse_group.add_argument(
+        "--allow-reverse",
+        action="store_true",
+        help="Allow reverse motion (overrides RL checkpoint env_cfg no_reverse).",
+    )
     parser.add_argument(
         "--turn-gain",
         type=float,
@@ -1828,6 +2007,12 @@ def main():
     parser.add_argument("--no-log", action="store_true", help="Disable planning logs")
     args = parser.parse_args()
 
+    no_reverse = None
+    if bool(getattr(args, "no_reverse", False)):
+        no_reverse = True
+    if bool(getattr(args, "allow_reverse", False)):
+        no_reverse = False
+
     # Check if checkpoint file exists, but don't exit if it doesn't (will use manual control)
     checkpoint_path = args.ckpt if args.ckpt.exists() else None
     if checkpoint_path is None:
@@ -1859,6 +2044,7 @@ def main():
         rl_boost_gain=args.rl_boost_gain,
         rl_boost_max=args.rl_boost_max,
         rl_boost_horizon=args.rl_boost_horizon,
+        no_reverse=no_reverse,
         turn_gain=args.turn_gain,
         curvature_slowdown=not args.no_curvature_slowdown,
         curvature_scale=args.curvature_scale,

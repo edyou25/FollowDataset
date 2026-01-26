@@ -37,6 +37,7 @@ import copy
 import json
 import math
 import time
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -71,6 +72,7 @@ class RewardConfig:
     clearance_w: float = 0.0
     clearance_margin: float = 0.2
     collision_penalty: float = 10.0
+    timeout_penalty: float = 0.0
     goal_bonus: float = 10.0
     target_tension: float = 0.7
 
@@ -89,11 +91,16 @@ class GuideFollowEnv:
         base_device: str = "auto",
         base_use_ema: bool = True,
         base_inference_steps: int = 8,
+        base_inference_interval: Optional[int] = None,
+        no_reverse: bool = False,
         residual_scale: float = 0.25,
         residual_boost_margin: float = 0.0,
         residual_boost_gain: float = 0.0,
         residual_boost_max: float = 3.0,
         residual_boost_horizon: int = 1,
+        residual_obs_aug: bool = False,
+        replay_collision_prob: float = 0.0,
+        replay_collision_max: int = 0,
         path_length: float = 50.0,
         leash_length: float = 1.5,
         robot_speed: float = 1.5,
@@ -113,6 +120,11 @@ class GuideFollowEnv:
         self._base_seed = None if seed is None else int(seed)
         self._episode_idx = 0
         self._step_idx = 0
+        self.no_reverse = bool(no_reverse)
+        self.replay_collision_prob = float(replay_collision_prob)
+        replay_max = max(0, int(replay_collision_max))
+        self._replay_collision_bank: deque[dict] = deque(maxlen=replay_max)
+        self._used_replay_this_episode = False
         self.base_ckpt = None if base_ckpt is None else Path(base_ckpt)
         self.uses_base_policy = self.base_ckpt is not None
         self.residual_scale = float(residual_scale)
@@ -120,6 +132,7 @@ class GuideFollowEnv:
         self.residual_boost_gain = float(residual_boost_gain)
         self.residual_boost_max = float(residual_boost_max)
         self.residual_boost_horizon = max(1, int(residual_boost_horizon))
+        self.residual_obs_aug = bool(residual_obs_aug)
         self._base_action_seq: Optional[np.ndarray] = None
         self._base_action_idx = 0
         self._base_steps_since_inference = 0
@@ -160,8 +173,6 @@ class GuideFollowEnv:
             self.planner.lookahead_stride = max(1, int(lookahead_stride))
 
             if int(n_obs_steps) != int(self.planner.n_obs_steps):
-                from collections import deque
-
                 self.planner.n_obs_steps = int(n_obs_steps)
                 self.planner.obs_history = deque(maxlen=self.planner.n_obs_steps)
 
@@ -171,13 +182,164 @@ class GuideFollowEnv:
         self._s_end: float = 0.0
         self._prev_s: float = 0.0
         if self.uses_base_policy:
-            self._base_inference_interval = max(1, int(getattr(self.planner, "n_action_steps", 2)) // 2)
+            default_interval = max(1, int(getattr(self.planner, "n_action_steps", 2)) // 2)
+            if base_inference_interval is None:
+                self._base_inference_interval = default_interval
+            else:
+                self._base_inference_interval = max(1, int(base_inference_interval))
 
     @property
     def obs_dim(self) -> int:
         # Flatten obs_history: (n_obs_steps, obs_dim) -> (n_obs_steps * obs_dim,)
         obs = self._get_obs_vector()
         return int(obs.shape[0])
+
+    @staticmethod
+    def _rotate_to_robot_frame(vec_world: np.ndarray, heading: float) -> np.ndarray:
+        cos_h = float(np.cos(heading))
+        sin_h = float(np.sin(heading))
+        x = float(vec_world[0])
+        y = float(vec_world[1])
+        return np.array([cos_h * x + sin_h * y, -sin_h * x + cos_h * y], dtype=np.float32)
+
+    def _closest_obstacle_vector_robot_frame(self, *, obstacles, segments) -> tuple[np.ndarray, float]:
+        """
+        Returns (vector_to_most_dangerous_obstacle_in_robot_frame, clearance_m).
+
+        We consider both robot and human clearances and pick the obstacle that is closest
+        to either agent (with their respective radii). The returned vector points from
+        the robot to that obstacle point, expressed in the robot frame.
+        """
+        robot_pos = self.planner.physics.robot.position.astype(np.float32)
+        human_pos = self.planner.physics.human.position.astype(np.float32)
+        heading = float(self.planner.physics.robot.heading)
+        rr = float(self.planner.physics.robot_radius)
+        hr = float(self.planner.physics.human_radius)
+
+        best_clear = float("inf")
+        best_point: Optional[np.ndarray] = None
+
+        agents = (
+            (robot_pos, rr),
+            (human_pos, hr),
+        )
+
+        if obstacles is not None and len(obstacles) > 0:
+            for obs in obstacles:
+                if isinstance(obs, dict):
+                    ox = float(obs.get("x", 0.0))
+                    oy = float(obs.get("y", 0.0))
+                    radius = float(obs.get("r", 0.0))
+                else:
+                    ox = float(obs[0])
+                    oy = float(obs[1])
+                    radius = float(obs[2])
+                center = np.array([ox, oy], dtype=np.float32)
+                r_obs = float(radius)
+                for agent_pos, agent_r in agents:
+                    vec_ca = agent_pos - center
+                    dist = float(np.linalg.norm(vec_ca))
+                    clear = dist - (r_obs + float(agent_r))
+                    if clear < best_clear:
+                        if dist > 1e-6:
+                            dir_ca = (vec_ca / dist).astype(np.float32)
+                        else:
+                            dir_ca = np.array([1.0, 0.0], dtype=np.float32)
+                        boundary = center + dir_ca * r_obs
+                        best_clear = clear
+                        best_point = boundary
+
+        if segments is not None and len(segments) > 0:
+            for seg in segments:
+                if isinstance(seg, dict):
+                    if "p1" in seg and "p2" in seg:
+                        p1 = np.array(seg["p1"], dtype=np.float32)
+                        p2 = np.array(seg["p2"], dtype=np.float32)
+                    else:
+                        p1 = np.array([seg.get("x1", 0.0), seg.get("y1", 0.0)], dtype=np.float32)
+                        p2 = np.array([seg.get("x2", 0.0), seg.get("y2", 0.0)], dtype=np.float32)
+                else:
+                    p1 = np.array([seg[0], seg[1]], dtype=np.float32)
+                    p2 = np.array([seg[2], seg[3]], dtype=np.float32)
+                ab = p2 - p1
+                denom = float(np.dot(ab, ab))
+                for agent_pos, agent_r in agents:
+                    if denom < 1e-12:
+                        closest = p1
+                    else:
+                        t_proj = float(np.dot(agent_pos - p1, ab)) / denom
+                        t_proj = float(np.clip(t_proj, 0.0, 1.0))
+                        closest = p1 + t_proj * ab
+                    dist_sq = float(np.dot(agent_pos - closest, agent_pos - closest))
+                    dist = float(np.sqrt(dist_sq))
+                    clear = dist - float(agent_r)
+                    if clear < best_clear:
+                        best_clear = clear
+                        best_point = closest
+
+        if best_point is None:
+            return np.zeros((2,), dtype=np.float32), float("inf")
+        best_vec_world = (best_point - robot_pos).astype(np.float32)
+        best_vec_rf = self._rotate_to_robot_frame(best_vec_world, heading)
+        return best_vec_rf, float(best_clear)
+
+    def _peek_base_control(self, *, obstacles, segments) -> tuple[float, float, float]:
+        """
+        Peek base control (forward, turn) for current state without advancing base action index.
+        Also returns predicted min clearance for that base control (with horizon).
+        """
+        if not self.uses_base_policy:
+            return 0.0, 0.0, float("inf")
+        if self._base_action_seq is None or len(self._base_action_seq) == 0:
+            self._base_action_seq = self.planner._predict_action()
+            self._base_action_idx = 0
+            self._base_steps_since_inference = 0
+        if self._base_action_seq is None or len(self._base_action_seq) == 0:
+            return 0.0, 0.0, float("inf")
+        idx = int(np.clip(self._base_action_idx, 0, max(0, len(self._base_action_seq) - 1)))
+        base_action = np.asarray(self._base_action_seq[idx], dtype=np.float32)
+        base_forward, base_turn = self._base_action_to_control(base_action)
+        clearance = self._predict_min_clearance(base_forward, base_turn, obstacles=obstacles, segments=segments)
+        return float(base_forward), float(base_turn), float(clearance)
+
+    def _build_residual_aug_features(self) -> np.ndarray:
+        """
+        Residual-only extra observation features to make wall avoidance learnable.
+
+        Layout (7 dims):
+          [0] clearance_min_now
+          [1] clearance_violation_now (w.r.t clearance_margin)
+          [2] clearance_base_pred (peeked from base action)
+          [3] base_forward_peek
+          [4] base_turn_peek
+          [5] closest_obs_vec_x (robot frame, clipped)
+          [6] closest_obs_vec_y (robot frame, clipped)
+        """
+        if self.planner.current_path_data is None:
+            return np.zeros((7,), dtype=np.float32)
+        obstacles = self.planner.current_path_data.get("obstacles")
+        segments = self.planner.current_path_data.get("segment_obstacles")
+
+        vec_rf, clearance_now = self._closest_obstacle_vector_robot_frame(obstacles=obstacles, segments=segments)
+        margin = float(self.reward.clearance_margin)
+        violation_now = float(max(0.0, margin - float(clearance_now)))
+
+        base_forward, base_turn, clearance_base = self._peek_base_control(obstacles=obstacles, segments=segments)
+        # Clip for numerical stability.
+        vec_rf = np.clip(vec_rf.astype(np.float32), -5.0, 5.0)
+
+        return np.array(
+            [
+                float(np.clip(clearance_now, -10.0, 10.0)),
+                float(np.clip(violation_now, 0.0, 10.0)),
+                float(np.clip(clearance_base, -10.0, 10.0)),
+                float(np.clip(base_forward, -1.0, 1.0)),
+                float(np.clip(base_turn, -1.0, 1.0)),
+                float(vec_rf[0]),
+                float(vec_rf[1]),
+            ],
+            dtype=np.float32,
+        )
 
     def _maybe_seed(self):
         if self._base_seed is None:
@@ -193,7 +355,18 @@ class GuideFollowEnv:
         self._base_action_idx = 0
         self._base_steps_since_inference = 0
 
-        path_data = self.path_generator.generate()
+        self._used_replay_this_episode = False
+        use_replay = (
+            float(self.replay_collision_prob) > 0.0
+            and len(self._replay_collision_bank) > 0
+            and np.random.rand() < float(self.replay_collision_prob)
+        )
+        if use_replay:
+            idx = int(np.random.randint(0, len(self._replay_collision_bank)))
+            path_data = copy.deepcopy(self._replay_collision_bank[idx])
+            self._used_replay_this_episode = True
+        else:
+            path_data = self.path_generator.generate()
         self.planner.set_path_data(path_data, reset=True)
 
         # Cache path arclength for progress reward.
@@ -322,7 +495,11 @@ class GuideFollowEnv:
             )
             self.planner._seed_obs_history(self.planner.physics.robot.position, self.planner.physics.human.position)
         obs_seq = np.stack(self.planner.obs_history, axis=0).astype(np.float32)
-        return obs_seq.reshape(-1)
+        obs_flat = obs_seq.reshape(-1)
+        if self.uses_base_policy and self.residual_obs_aug:
+            aug = self._build_residual_aug_features()
+            return np.concatenate([obs_flat, aug], axis=0).astype(np.float32)
+        return obs_flat
 
     def _pop_base_action(self) -> np.ndarray:
         if not self.uses_base_policy:
@@ -406,10 +583,14 @@ class GuideFollowEnv:
             d_turn = float(residual_scale_eff) * a1
             forward = float(np.clip(base_forward + d_forward, -1.0, 1.0))
             turn = float(np.clip(base_turn + d_turn, -1.0, 1.0))
+            if self.no_reverse:
+                forward = max(0.0, float(forward))
             action_cost = d_forward * d_forward + d_turn * d_turn
         else:
             forward = a0
             turn = a1
+            if self.no_reverse:
+                forward = max(0.0, float(forward))
             action_cost = forward * forward + turn * turn
 
         collided = False
@@ -497,6 +678,9 @@ class GuideFollowEnv:
             done = True
             done_reason = "collision"
             reward -= float(self.reward.collision_penalty)
+            if self._replay_collision_bank.maxlen:
+                if self.planner.current_path_data is not None:
+                    self._replay_collision_bank.append(copy.deepcopy(self.planner.current_path_data))
 
         # Goal reached (by human progress).
         if not done and self._path_s is not None and s_human >= self._s_end - 1e-3:
@@ -508,6 +692,7 @@ class GuideFollowEnv:
         if not done and self._step_idx >= self.max_steps:
             done = True
             done_reason = "timeout"
+            reward -= float(self.reward.timeout_penalty)
 
         info = {
             "progress": float(progress),
@@ -528,6 +713,8 @@ class GuideFollowEnv:
             "clearance_penalty": float(clearance_penalty),
             "collided": bool(collided),
             "done_reason": done_reason,
+            "replay_collision_used": bool(self._used_replay_this_episode),
+            "replay_collision_bank_size": int(len(self._replay_collision_bank)),
             "collision_info": collision_info,
             "step": int(self._step_idx),
         }
@@ -557,11 +744,19 @@ def build_env_cfg(
         "base_ckpt": str(args.base_ckpt) if args.base_ckpt is not None else None,
         "base_use_ema": bool(not args.base_no_ema),
         "base_inference_steps": int(args.base_inference_steps),
+        "base_inference_interval": int(args.base_inference_interval)
+        if getattr(args, "base_inference_interval", None) is not None
+        else None,
+        "no_reverse": bool(getattr(args, "no_reverse", False)),
         "residual_scale": float(args.residual_scale),
         "residual_boost_margin": float(args.residual_boost_margin),
         "residual_boost_gain": float(args.residual_boost_gain),
         "residual_boost_max": float(args.residual_boost_max),
         "residual_boost_horizon": int(args.residual_boost_horizon),
+        "residual_obs_aug": bool(args.residual_obs_aug),
+        "residual_obs_aug_dim": int(7) if bool(args.residual_obs_aug) else 0,
+        "replay_collision_prob": float(getattr(args, "replay_collision_prob", 0.0)),
+        "replay_collision_max": int(getattr(args, "replay_collision_max", 0)),
         "init_log_std": float(init_log_std),
         "path_length": float(args.path_length),
         "leash_length": float(args.leash_length),
@@ -620,16 +815,21 @@ def train(args: argparse.Namespace) -> Path:
 
     if getattr(args, "robust_avoidance", False):
         args.rw_collision = max(float(args.rw_collision), 100.0)
-        args.rw_clearance = max(float(args.rw_clearance), 5.0)
-        args.clearance_margin = max(float(args.clearance_margin), 0.3)
-        args.rw_robot_deviation = max(float(args.rw_robot_deviation), 0.5)
+        args.rw_clearance = max(float(args.rw_clearance), 20.0)
+        args.clearance_margin = max(float(args.clearance_margin), 0.5)
         args.rw_action = min(float(args.rw_action), 0.005)
-        args.residual_scale = max(float(args.residual_scale), 0.25)
+        args.rw_progress = max(float(args.rw_progress), 2.0)
+        args.rw_goal = max(float(args.rw_goal), 50.0)
+        args.residual_scale = max(float(args.residual_scale), 0.5)
         args.residual_boost_margin = max(float(args.residual_boost_margin), float(args.clearance_margin))
-        args.residual_boost_gain = max(float(args.residual_boost_gain), 5.0)
-        args.residual_boost_max = max(float(args.residual_boost_max), 3.0)
-        args.residual_boost_horizon = max(int(args.residual_boost_horizon), 3)
+        args.residual_boost_gain = max(float(args.residual_boost_gain), 10.0)
+        args.residual_boost_max = max(float(args.residual_boost_max), 5.0)
+        args.residual_boost_horizon = max(int(args.residual_boost_horizon), 5)
+        args.residual_obs_aug = True
+        args.rw_timeout = max(float(args.rw_timeout), 50.0)
         args.ent_coef = max(float(args.ent_coef), 0.01)
+        if not bool(getattr(args, "allow_reverse", False)):
+            args.no_reverse = True
 
     reward_cfg = RewardConfig(
         progress_w=args.rw_progress,
@@ -640,6 +840,7 @@ def train(args: argparse.Namespace) -> Path:
         clearance_w=args.rw_clearance,
         clearance_margin=args.clearance_margin,
         collision_penalty=args.rw_collision,
+        timeout_penalty=args.rw_timeout,
         goal_bonus=args.rw_goal,
         target_tension=args.target_tension,
     )
@@ -648,11 +849,16 @@ def train(args: argparse.Namespace) -> Path:
         base_device=args.base_device,
         base_use_ema=not args.base_no_ema,
         base_inference_steps=args.base_inference_steps,
+        base_inference_interval=args.base_inference_interval,
+        no_reverse=bool(getattr(args, "no_reverse", False)),
         residual_scale=args.residual_scale,
         residual_boost_margin=args.residual_boost_margin,
         residual_boost_gain=args.residual_boost_gain,
         residual_boost_max=args.residual_boost_max,
         residual_boost_horizon=args.residual_boost_horizon,
+        residual_obs_aug=bool(args.residual_obs_aug),
+        replay_collision_prob=float(args.replay_collision_prob),
+        replay_collision_max=int(args.replay_collision_max),
         path_length=args.path_length,
         leash_length=args.leash_length,
         robot_speed=args.robot_speed,
@@ -736,6 +942,9 @@ def train(args: argparse.Namespace) -> Path:
     episode_return = 0.0
     episode_len = 0
     episode_idx = 0
+    best_episode_return = -float("inf")
+    best_episode_idx = 0
+    best_ckpt_path = save_dir / f"ppo_{run_id}_best.pt"
     start_time = time.time()
 
     num_updates = max(1, int(args.total_steps) // rollout_steps)
@@ -761,6 +970,24 @@ def train(args: argparse.Namespace) -> Path:
 
             if done:
                 episode_idx += 1
+                if bool(getattr(args, "save_best", True)) and float(episode_return) > float(best_episode_return):
+                    best_episode_return = float(episode_return)
+                    best_episode_idx = int(episode_idx)
+                    torch.save(
+                        {
+                            "algo": "ppo",
+                            "run_id": run_id,
+                            "global_step": int(global_step),
+                            "obs_dim": int(env.obs_dim),
+                            "action_dim": 2,
+                            "hidden_dim": int(args.hidden_dim),
+                            "state_dict": policy.state_dict(),
+                            "env_cfg": env_cfg,
+                            "best_episode_return": float(best_episode_return),
+                            "best_episode_idx": int(best_episode_idx),
+                        },
+                        best_ckpt_path,
+                    )
                 if args.print_interval > 0 and episode_idx % int(args.print_interval) == 0:
                     elapsed = max(1e-6, time.time() - start_time)
                     sps = int(global_step / elapsed)
@@ -782,6 +1009,12 @@ def train(args: argparse.Namespace) -> Path:
                             "episode/done_timeout": 1.0 if done_reason == "timeout" else 0.0,
                             "episode/s_end": float(info.get("s_end", 0.0)),
                             "episode/s_human": float(info.get("s_human", 0.0)),
+                            "episode/replay_collision_used": float(
+                                1.0 if info.get("replay_collision_used") else 0.0
+                            ),
+                            "episode/replay_collision_bank_size": float(
+                                info.get("replay_collision_bank_size", 0.0)
+                            ),
                             "safety/clearance_min": float(info.get("clearance_min", 0.0)),
                             "safety/clearance_violation": float(info.get("clearance_violation", 0.0)),
                         },
@@ -799,6 +1032,8 @@ def train(args: argparse.Namespace) -> Path:
                             "done_reason": info.get("done_reason"),
                             "s_end": float(info.get("s_end", 0.0)),
                             "s_human": float(info.get("s_human", 0.0)),
+                            "replay_collision_used": bool(info.get("replay_collision_used")),
+                            "replay_collision_bank_size": int(info.get("replay_collision_bank_size", 0)),
                             "clearance_min": float(info.get("clearance_min", 0.0)),
                             "clearance_violation": float(info.get("clearance_violation", 0.0)),
                         },
@@ -944,11 +1179,17 @@ def train(args: argparse.Namespace) -> Path:
             "hidden_dim": int(args.hidden_dim),
             "state_dict": policy.state_dict(),
             "env_cfg": env_cfg,
+            "best_episode_return": float(best_episode_return),
+            "best_episode_idx": int(best_episode_idx),
         },
         ckpt_path,
     )
     if wandb_run is not None:
         wandb_run.summary["ckpt_path"] = str(ckpt_path)
+        if bool(getattr(args, "save_best", True)):
+            wandb_run.summary["best_ckpt_path"] = str(best_ckpt_path)
+            wandb_run.summary["best_episode_return"] = float(best_episode_return)
+            wandb_run.summary["best_episode_idx"] = int(best_episode_idx)
         wandb_run.summary["global_step"] = int(global_step)
         wandb_run.finish()
     if log_fp is not None:
@@ -973,6 +1214,9 @@ def evaluate(args: argparse.Namespace):
     base_inference_steps = env_cfg.get("base_inference_steps", 8)
     if args.base_inference_steps is not None:
         base_inference_steps = int(args.base_inference_steps)
+    base_inference_interval = env_cfg.get("base_inference_interval", None)
+    if getattr(args, "base_inference_interval", None) is not None:
+        base_inference_interval = int(args.base_inference_interval)
     residual_scale = env_cfg.get("residual_scale", 0.25)
     if args.residual_scale is not None:
         residual_scale = float(args.residual_scale)
@@ -981,17 +1225,27 @@ def evaluate(args: argparse.Namespace):
     residual_boost_gain = float(env_cfg.get("residual_boost_gain", 0.0))
     residual_boost_max = float(env_cfg.get("residual_boost_max", 3.0))
     residual_boost_horizon = int(env_cfg.get("residual_boost_horizon", 1))
+    residual_obs_aug = bool(env_cfg.get("residual_obs_aug", False))
+
+    no_reverse = bool(env_cfg.get("no_reverse", False))
+    if bool(getattr(args, "no_reverse", False)):
+        no_reverse = True
+    if bool(getattr(args, "allow_reverse", False)):
+        no_reverse = False
 
     env = GuideFollowEnv(
         base_ckpt=base_ckpt,
         base_device=args.base_device,
         base_use_ema=base_use_ema,
         base_inference_steps=int(base_inference_steps),
+        base_inference_interval=base_inference_interval,
+        no_reverse=bool(no_reverse),
         residual_scale=float(residual_scale),
         residual_boost_margin=float(residual_boost_margin),
         residual_boost_gain=float(residual_boost_gain),
         residual_boost_max=float(residual_boost_max),
         residual_boost_horizon=int(residual_boost_horizon),
+        residual_obs_aug=bool(residual_obs_aug),
         path_length=env_cfg.get("path_length", 50.0),
         leash_length=env_cfg.get("leash_length", 1.5),
         robot_speed=env_cfg.get("robot_speed", 1.5),
@@ -1046,11 +1300,15 @@ def evaluate(args: argparse.Namespace):
 
 @torch.no_grad()
 def evaluate_base(args: argparse.Namespace):
+    no_reverse = bool(getattr(args, "no_reverse", False))
+    if bool(getattr(args, "allow_reverse", False)):
+        no_reverse = False
     env = GuideFollowEnv(
         base_ckpt=Path(args.base_ckpt),
         base_device=args.base_device,
         base_use_ema=not bool(args.base_no_ema),
         base_inference_steps=int(args.base_inference_steps),
+        no_reverse=bool(no_reverse),
         residual_scale=0.0,
         seed=int(args.seed),
     )
@@ -1119,6 +1377,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_train.add_argument("--base-device", default="auto")
     p_train.add_argument("--base-no-ema", action="store_true", help="Use non-EMA model for base policy")
     p_train.add_argument("--base-inference-steps", type=int, default=64)
+    p_train.add_argument(
+        "--base-inference-interval",
+        type=int,
+        default=None,
+        help="How often to re-run base policy inference (data steps). Default: n_action_steps//2.",
+    )
     p_train.add_argument("--residual-scale", type=float, default=0.10)
     p_train.add_argument(
         "--residual-boost-margin",
@@ -1145,6 +1409,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Predict clearance over this many future control steps when boosting (>=1).",
     )
     p_train.add_argument(
+        "--residual-obs-aug",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Append safety/clearance features to residual RL observation (base policy input unchanged).",
+    )
+    p_train.add_argument(
         "--robust-avoidance",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -1155,6 +1425,17 @@ def build_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Zero-initialize actor output layer so residual starts at 0.",
+    )
+    reverse_group = p_train.add_mutually_exclusive_group()
+    reverse_group.add_argument(
+        "--no-reverse",
+        action="store_true",
+        help="Clamp forward control to >=0 (disallow reversing).",
+    )
+    reverse_group.add_argument(
+        "--allow-reverse",
+        action="store_true",
+        help="Allow reverse motion (overrides --no-reverse and robust-avoidance preset).",
     )
 
     # env params
@@ -1169,6 +1450,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_train.add_argument("--n-obstacle-circles", type=int, default=14)
     p_train.add_argument("--n-obstacle-segments", type=int, default=12)
     p_train.add_argument("--max-steps", type=int, default=300)
+    p_train.add_argument(
+        "--replay-collision-prob",
+        type=float,
+        default=0.0,
+        help="With this probability, start an episode from a previously-collided path (speeds up learning on hard cases).",
+    )
+    p_train.add_argument(
+        "--replay-collision-max",
+        type=int,
+        default=0,
+        help="Max number of collided paths to keep for replay (0 disables).",
+    )
 
     # rewards
     p_train.add_argument("--rw-progress", type=float, default=1.0)
@@ -1194,12 +1487,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="Safety margin (m) beyond collision boundary for clearance penalty.",
     )
     p_train.add_argument("--rw-collision", type=float, default=10.0)
+    p_train.add_argument("--rw-timeout", type=float, default=0.0, help="Penalty applied when episode ends by timeout.")
     p_train.add_argument("--rw-goal", type=float, default=10.0)
     p_train.add_argument("--target-tension", type=float, default=0.7)
 
     # io
     p_train.add_argument("--save-dir", type=Path, default=THIS_DIR / "rl_models")
     p_train.add_argument("--save-every", type=int, default=0, help="Save every N updates (0=only final)")
+    p_train.add_argument(
+        "--save-best",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Save a *_best.pt checkpoint whenever a new best episode return is observed.",
+    )
     p_train.add_argument("--log-dir", type=Path, default=THIS_DIR / "logs")
     p_train.add_argument("--print-interval", type=int, default=5)
     p_train.add_argument(
@@ -1230,7 +1530,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_eval.add_argument("--base-device", default="auto")
     p_eval.add_argument("--base-no-ema", action="store_true")
     p_eval.add_argument("--base-inference-steps", type=int, default=None)
+    p_eval.add_argument("--base-inference-interval", type=int, default=None)
     p_eval.add_argument("--residual-scale", type=float, default=None)
+    eval_reverse_group = p_eval.add_mutually_exclusive_group()
+    eval_reverse_group.add_argument(
+        "--no-reverse",
+        action="store_true",
+        help="Clamp forward control to >=0 (disallow reversing).",
+    )
+    eval_reverse_group.add_argument(
+        "--allow-reverse",
+        action="store_true",
+        help="Allow reverse motion (overrides --no-reverse and the checkpoint env_cfg).",
+    )
 
     p_base = sub.add_parser("eval-base")
     p_base.add_argument("--base-ckpt", type=Path, required=True)
@@ -1239,6 +1551,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_base.add_argument("--base-inference-steps", type=int, default=64)
     p_base.add_argument("--episodes", type=int, default=10)
     p_base.add_argument("--seed", type=int, default=0)
+    base_reverse_group = p_base.add_mutually_exclusive_group()
+    base_reverse_group.add_argument(
+        "--no-reverse",
+        action="store_true",
+        help="Clamp forward control to >=0 (disallow reversing).",
+    )
+    base_reverse_group.add_argument(
+        "--allow-reverse",
+        action="store_true",
+        help="Allow reverse motion (overrides --no-reverse).",
+    )
 
     return parser
 
