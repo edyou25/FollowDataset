@@ -4,6 +4,7 @@ Guide Dog Robot Planning Tool (model-based simulation)
 
 Controls:
     P     Toggle policy/manual control
+    M     Toggle MPC control
     SPACE Pause/Resume
     R     Reset position
     N     Generate new path
@@ -42,6 +43,7 @@ from src.path_generator import PathGenerator
 from src.physics import PhysicsEngine
 from src.visualizer import Visualizer
 from src.scoring import TrajectoryScorer
+from src.mpc import CEMMPC, CEMMPCConfig
 
 
 def _resolve_class(dotted_path: str):
@@ -114,6 +116,25 @@ class ModelPlanner:
         visualizer: Optional[Visualizer] = None,
         create_visualizer: bool = True,
         collision_behavior: str = "reset",
+        # Traditional optimization-based controller (CEM-MPC).
+        use_mpc: bool = False,
+        mpc_horizon: int = 8,
+        mpc_samples: int = 256,
+        mpc_iters: int = 2,
+        mpc_elites: int = 16,
+        mpc_forward: float = 0.8,
+        mpc_forward_std: float = 0.3,
+        mpc_turn_std: float = 0.8,
+        mpc_w_track: float = 10.0,
+        mpc_w_heading: float = 1.0,
+        mpc_w_u: float = 0.1,
+        mpc_w_smooth: float = 0.05,
+        mpc_w_progress: float = 2.0,
+        mpc_clearance_margin: float = 0.2,
+        mpc_w_clearance: float = 200.0,
+        mpc_w_collision: float = 1.0e5,
+        mpc_seed: int = 0,
+        mpc_track: str = "human",
     ):
         self.fps = fps
         self.sim_dt = 1.0 / fps
@@ -339,6 +360,7 @@ class ModelPlanner:
         self.running = True
         self.paused = False
         self.use_policy = False
+        self.use_mpc = bool(use_mpc)
         self.collision_pause = False
         self.collision_happened = False
         self.collision_info = None
@@ -376,7 +398,42 @@ class ModelPlanner:
         self.curvature_scale = float(curvature_scale)
         self.min_speed_scale = float(min_speed_scale)
         self.current_speed_scale = 1.0
-        
+
+        # MPC (traditional optimization) config/state (delegated to src.mpc).
+        track = str(mpc_track or "human").strip().lower()
+        self.mpc_track = "human" if track == "human" else "robot"
+        self.mpc_cfg = CEMMPCConfig(
+            horizon=max(1, int(mpc_horizon)),
+            samples=max(8, int(mpc_samples)),
+            iters=max(1, int(mpc_iters)),
+            elites=int(max(1, min(int(mpc_elites), max(8, int(mpc_samples))))),
+            forward=float(mpc_forward),
+            forward_std=float(mpc_forward_std),
+            turn_std=float(mpc_turn_std),
+            track=str(self.mpc_track),
+            w_track=float(mpc_w_track),
+            w_heading=float(mpc_w_heading),
+            w_u=float(mpc_w_u),
+            w_smooth=float(mpc_w_smooth),
+            w_progress=float(mpc_w_progress),
+            clearance_margin=float(mpc_clearance_margin),
+            w_clearance=float(mpc_w_clearance),
+            w_collision=float(mpc_w_collision),
+            allow_reverse=False,
+        )
+        self.mpc_solver = CEMMPC(
+            config=self.mpc_cfg,
+            sim_dt=float(self.sim_dt),
+            frame_stride=int(self.frame_stride),
+            robot_speed=float(self.physics.robot_speed),
+            turn_speed=float(self.physics.turn_speed),
+            leash_length=float(self.physics.leash_length),
+            human_drag=float(getattr(self.physics, "human_drag", 0.9)),
+            robot_radius=float(self.physics.robot_radius),
+            human_radius=float(self.physics.human_radius),
+            seed=int(mpc_seed),
+        )
+
         # Reduce inference steps for faster performance
         if self.policy is not None and hasattr(self.policy, 'num_inference_steps'):
             original_steps = self.policy.num_inference_steps
@@ -480,6 +537,8 @@ class ModelPlanner:
         self.cached_control = (0.0, 0.0)
         self.current_action = None
         self.current_delta = None
+        if getattr(self, "mpc_solver", None) is not None:
+            self.mpc_solver.reset()
         self._log_event("reset_position", {"robot_pos": self.physics.robot.position.tolist()})
 
     def _seed_obs_history(self, robot_pos: np.ndarray, human_pos: np.ndarray):
@@ -535,6 +594,7 @@ class ModelPlanner:
             "turn": float(turn),
             "speed_scale": float(self.current_speed_scale),
             "use_policy": bool(self.use_policy),
+            "use_mpc": bool(self.use_mpc),
             "paused": bool(self.paused),
             "scores": scores,
         }
@@ -578,6 +638,10 @@ class ModelPlanner:
                         mode = "policy" if self.use_policy else "manual"
                     else:
                         mode = "manual (no checkpoint)"
+                    print(f"Control mode: {mode}")
+                elif event.key == pygame.K_m:
+                    self.use_mpc = not bool(self.use_mpc)
+                    mode = "mpc" if self.use_mpc else ("policy" if self.use_policy else "manual")
                     print(f"Control mode: {mode}")
 
     def _get_manual_control(self) -> Tuple[float, float]:
@@ -1081,6 +1145,25 @@ class ModelPlanner:
         forward_input = float(np.clip(forward_input, -1.0, 1.0))
         return forward_input, turn_input
 
+    def _mpc_control(self) -> tuple[float, float, Optional[np.ndarray]]:
+        """Solve MPC for the current state/path (delegates to `src.mpc`)."""
+        if self.current_path_data is None:
+            return 0.0, 0.0, None
+        path = self.current_path_data.get("path")
+        if path is None or len(path) == 0:
+            return 0.0, 0.0, None
+        return self.mpc_solver.solve(
+            robot_pos=self.physics.robot.position,
+            robot_heading=float(self.physics.robot.heading),
+            robot_vel=self.physics.robot.velocity,
+            human_pos=self.physics.human.position,
+            human_vel=self.physics.human.velocity,
+            path=path,
+            path_s=self.current_path_data.get("_path_s"),
+            obstacles=self.current_path_data.get("obstacles"),
+            segments=self.current_path_data.get("segment_obstacles"),
+        )
+
     def _step(self):
         """Advance simulation by one step."""
         self.collision_happened = False
@@ -1097,7 +1180,18 @@ class ModelPlanner:
         is_data_step = (self.frame_count % self.frame_stride == 0)
 
         if not self.paused:
-            if self.use_policy and self.policy is not None:
+            if self.use_mpc:
+                # MPC control at data rate; hold between data steps.
+                if is_data_step:
+                    forward, turn, planned = self._mpc_control()
+                    self.planned_path = planned
+                    self.cached_control = (forward, turn)
+                    self.current_action = None
+                    self.current_delta = None
+                    self.current_speed_scale = 1.0
+                else:
+                    forward, turn = self.cached_control
+            elif self.use_policy and self.policy is not None:
                 # Update policy/action at data rate; hold control between data steps.
                 if is_data_step:
                     if (self.cached_action_seq is None or 
@@ -1271,7 +1365,7 @@ class ModelPlanner:
 
     def _render(self, robot_state, human_state, actual_fps: float):
         scores = self.scorer.get_scores() if self.scorer else {}
-        mode = "policy" if self.use_policy else "manual"
+        mode = "mpc" if self.use_mpc else ("policy" if self.use_policy else "manual")
         if self.paused:
             mode += " (paused)"
         elif self.collision_pause:
@@ -1290,6 +1384,7 @@ class ModelPlanner:
             "human_radius": self.physics.human_radius,
             "controls": [
                 "P: Policy/Manual",
+                "M: MPC",
                 "SPACE: Pause",
                 "R: Reset",
                 "N: New Path",
@@ -1338,7 +1433,7 @@ class ModelPlanner:
         print("=" * 60)
         print("Guide Dog Robot Planning Tool")
         print("=" * 60)
-        print("Controls: P=Policy/Manual | SPACE=Pause | R=Reset | N=NewPath | ESC=Exit")
+        print("Controls: P=Policy/Manual | M=MPC | SPACE=Pause | R=Reset | N=NewPath | ESC=Exit")
         print("=" * 60)
 
         while self.running:
@@ -1368,6 +1463,11 @@ def main():
         default=default_ckpt,
         help="Path to the trained checkpoint (.ckpt). If not found, will run in manual control mode.",
     )
+    parser.add_argument(
+        "--no-policy",
+        action="store_true",
+        help="Skip loading the diffusion policy checkpoint (useful for MPC-only runs).",
+    )
     parser.add_argument("--device", default="auto", help="cpu, cuda:0, or auto")
     parser.add_argument("--no-ema", action="store_true", help="Use non-EMA model")
     parser.add_argument(
@@ -1395,6 +1495,48 @@ def main():
     parser.add_argument("--fps", type=int, default=20)
     parser.add_argument("--inference-steps", type=int, default=64,
                         help="Number of diffusion inference steps (lower=faster, default=64)")
+    parser.add_argument(
+        "--mpc",
+        action="store_true",
+        help="Start in traditional MPC mode (optimize robot controls to track the reference path).",
+    )
+    parser.add_argument(
+        "--mpc-track",
+        choices=["human", "robot"],
+        default="human",
+        help="Which agent to track to the reference path (human recommended).",
+    )
+    parser.add_argument("--mpc-horizon", type=int, default=8, help="MPC horizon in data steps.")
+    parser.add_argument("--mpc-samples", type=int, default=256, help="CEM population size per iteration.")
+    parser.add_argument("--mpc-iters", type=int, default=2, help="CEM iterations per control update.")
+    parser.add_argument("--mpc-elites", type=int, default=16, help="CEM elite count.")
+    parser.add_argument("--mpc-forward", type=float, default=0.8, help="Nominal forward command in [0,1].")
+    parser.add_argument("--mpc-forward-std", type=float, default=0.3, help="Sampling std for forward.")
+    parser.add_argument("--mpc-turn-std", type=float, default=0.8, help="Sampling std for turn.")
+    parser.add_argument("--mpc-w-track", type=float, default=10.0, help="Weight for position tracking error.")
+    parser.add_argument("--mpc-w-heading", type=float, default=1.0, help="Weight for heading tracking error.")
+    parser.add_argument("--mpc-w-u", type=float, default=0.1, help="Weight for control effort penalty.")
+    parser.add_argument("--mpc-w-smooth", type=float, default=0.05, help="Weight for turn smoothness penalty.")
+    parser.add_argument("--mpc-w-progress", type=float, default=2.0, help="Weight for forward progress reward.")
+    parser.add_argument(
+        "--mpc-clearance-margin",
+        type=float,
+        default=0.2,
+        help="Soft safety margin (m) for robot+human clearance to circle/segment obstacles.",
+    )
+    parser.add_argument(
+        "--mpc-w-clearance",
+        type=float,
+        default=200.0,
+        help="Weight for clearance soft-constraint penalty.",
+    )
+    parser.add_argument(
+        "--mpc-w-collision",
+        type=float,
+        default=1.0e5,
+        help="Weight for collision penalty (robot or human vs circle/segment obstacles).",
+    )
+    parser.add_argument("--mpc-seed", type=int, default=0, help="Random seed for MPC sampling.")
     parser.add_argument(
         "--turn-gain",
         type=float,
@@ -1434,8 +1576,8 @@ def main():
     args = parser.parse_args()
 
     # Check if checkpoint file exists, but don't exit if it doesn't (will use manual control)
-    checkpoint_path = args.ckpt if args.ckpt.exists() else None
-    if checkpoint_path is None:
+    checkpoint_path = None if bool(args.no_policy) else (args.ckpt if args.ckpt.exists() else None)
+    if checkpoint_path is None and not bool(args.no_policy):
         print(f"Warning: Checkpoint file not found: {args.ckpt}")
         print("Running in manual control mode only (no policy available).")
         print("\nAvailable checkpoints:")
@@ -1463,6 +1605,24 @@ def main():
         min_speed_scale=args.min_speed_scale,
         log_path=None if args.no_log else args.log_dir / f"planning_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl",
         log_interval=args.log_interval,
+        use_mpc=bool(args.mpc),
+        mpc_horizon=int(args.mpc_horizon),
+        mpc_samples=int(args.mpc_samples),
+        mpc_iters=int(args.mpc_iters),
+        mpc_elites=int(args.mpc_elites),
+        mpc_forward=float(args.mpc_forward),
+        mpc_forward_std=float(args.mpc_forward_std),
+        mpc_turn_std=float(args.mpc_turn_std),
+        mpc_w_track=float(args.mpc_w_track),
+        mpc_w_heading=float(args.mpc_w_heading),
+        mpc_w_u=float(args.mpc_w_u),
+        mpc_w_smooth=float(args.mpc_w_smooth),
+        mpc_w_progress=float(args.mpc_w_progress),
+        mpc_clearance_margin=float(args.mpc_clearance_margin),
+        mpc_w_clearance=float(args.mpc_w_clearance),
+        mpc_w_collision=float(args.mpc_w_collision),
+        mpc_seed=int(args.mpc_seed),
+        mpc_track=str(args.mpc_track),
     )
     planner.run()
 
