@@ -8,6 +8,10 @@ from typing import Optional
 
 class Visualizer:
     """Visualization interface for data collection"""
+
+    OCCMAP_GRID_SIZE = 20
+    OCCMAP_CELL_SIZE = .5  # meters
+    OCCMAP_HALF_EXTENT = OCCMAP_GRID_SIZE * OCCMAP_CELL_SIZE / 2.0
     
     # Color definitions
     COLORS = {
@@ -33,6 +37,13 @@ class Visualizer:
         'obstacle_obs': (255, 60, 60),
         'clear_safe': (80, 220, 120),
         'clear_warn': (255, 200, 80),
+        'occmap_panel': (34, 38, 48),
+        'occmap_free': (58, 68, 84),
+        'occmap_occ': (255, 120, 90),
+        'occmap_grid': (92, 104, 122),
+        'occmap_axis': (180, 220, 255),
+        'occmap_robot': (255, 220, 120),
+        'occmap_text': (230, 230, 230),
     }
     
     # Zoom settings
@@ -65,6 +76,7 @@ class Visualizer:
         # Layer visibility (click legend to toggle)
         self.layer_visibility = {
             "grid": True,
+            "occmap": True,
             "reference_path": True,
             "planned_path": True,
             "lookahead_points": True,
@@ -81,6 +93,9 @@ class Visualizer:
         }
         self._legend_hitboxes: dict[str, pygame.Rect] = {}
         self._legend_hover_key: Optional[str] = None
+        self.last_occmap = np.zeros(
+            (self.OCCMAP_GRID_SIZE, self.OCCMAP_GRID_SIZE), dtype=np.uint8
+        )
         
     def world_to_screen(self, world_pos: np.ndarray) -> tuple:
         """Convert world coordinates to screen coordinates"""
@@ -115,6 +130,7 @@ class Visualizer:
     def _legend_items(self) -> list[dict]:
         return [
             {"key": "grid", "label": "Grid", "color": self.COLORS["grid"]},
+            {"key": "occmap", "label": "Occ Map", "color": self.COLORS["occmap_occ"]},
             {"key": "reference_path", "label": "Ref Path", "color": self.COLORS["path_ref"]},
             {"key": "planned_path", "label": "Planned Path", "color": self.COLORS["path_plan"]},
             {"key": "lookahead_points", "label": "Lookahead", "color": self.COLORS["lookahead"]},
@@ -225,7 +241,283 @@ class Visualizer:
             start = self.world_to_screen(np.array([-100, y]))
             end = self.world_to_screen(np.array([100, y]))
             pygame.draw.line(self.screen, self.COLORS['grid'], start, end, 1)
-    
+
+    def _world_to_robot_frame(
+        self, point: np.ndarray, robot_pos: np.ndarray, robot_heading: float
+    ) -> np.ndarray:
+        """Convert a world-frame point into the robot frame (x forward, y left)."""
+        point = np.asarray(point, dtype=np.float32)
+        robot_pos = np.asarray(robot_pos, dtype=np.float32)
+        rel = point - robot_pos
+        cos_h = float(np.cos(robot_heading))
+        sin_h = float(np.sin(robot_heading))
+        return np.array(
+            [
+                cos_h * rel[0] + sin_h * rel[1],
+                -sin_h * rel[0] + cos_h * rel[1],
+            ],
+            dtype=np.float32,
+        )
+
+    def _iter_circle_obstacles(self, obstacles):
+        if obstacles is None or len(obstacles) == 0:
+            return
+        for obs in obstacles:
+            if isinstance(obs, dict):
+                x = float(obs.get("x", 0.0))
+                y = float(obs.get("y", 0.0))
+                r = float(obs.get("r", 0.0))
+            else:
+                x = float(obs[0])
+                y = float(obs[1])
+                r = float(obs[2])
+            yield np.array([x, y], dtype=np.float32), r
+
+    def _iter_segment_obstacles(self, segments):
+        if segments is None or len(segments) == 0:
+            return
+        for seg in segments:
+            if isinstance(seg, dict):
+                if "p1" in seg and "p2" in seg:
+                    p1 = np.array(seg["p1"], dtype=np.float32)
+                    p2 = np.array(seg["p2"], dtype=np.float32)
+                else:
+                    x1 = float(seg.get("x1", 0.0))
+                    y1 = float(seg.get("y1", 0.0))
+                    x2 = float(seg.get("x2", 0.0))
+                    y2 = float(seg.get("y2", 0.0))
+                    p1 = np.array([x1, y1], dtype=np.float32)
+                    p2 = np.array([x2, y2], dtype=np.float32)
+            else:
+                p1 = np.array([seg[0], seg[1]], dtype=np.float32)
+                p2 = np.array([seg[2], seg[3]], dtype=np.float32)
+            yield p1, p2
+
+    @staticmethod
+    def _circle_intersects_rect(
+        center: np.ndarray,
+        radius: float,
+        x_min: float,
+        y_min: float,
+        x_max: float,
+        y_max: float,
+    ) -> bool:
+        closest_x = float(np.clip(center[0], x_min, x_max))
+        closest_y = float(np.clip(center[1], y_min, y_max))
+        dx = float(center[0] - closest_x)
+        dy = float(center[1] - closest_y)
+        return dx * dx + dy * dy <= radius * radius
+
+    @staticmethod
+    def _point_in_rect(
+        point: np.ndarray,
+        x_min: float,
+        y_min: float,
+        x_max: float,
+        y_max: float,
+        eps: float = 1e-6,
+    ) -> bool:
+        return (
+            x_min - eps <= float(point[0]) <= x_max + eps
+            and y_min - eps <= float(point[1]) <= y_max + eps
+        )
+
+    @staticmethod
+    def _orientation(a: np.ndarray, b: np.ndarray, c: np.ndarray, eps: float = 1e-6) -> int:
+        val = float((b[1] - a[1]) * (c[0] - b[0]) - (b[0] - a[0]) * (c[1] - b[1]))
+        if abs(val) <= eps:
+            return 0
+        return 1 if val > 0 else 2
+
+    @staticmethod
+    def _on_segment(a: np.ndarray, b: np.ndarray, c: np.ndarray, eps: float = 1e-6) -> bool:
+        return (
+            min(float(a[0]), float(c[0])) - eps <= float(b[0]) <= max(float(a[0]), float(c[0])) + eps
+            and min(float(a[1]), float(c[1])) - eps <= float(b[1]) <= max(float(a[1]), float(c[1])) + eps
+        )
+
+    def _segments_intersect(
+        self, p1: np.ndarray, p2: np.ndarray, q1: np.ndarray, q2: np.ndarray
+    ) -> bool:
+        o1 = self._orientation(p1, p2, q1)
+        o2 = self._orientation(p1, p2, q2)
+        o3 = self._orientation(q1, q2, p1)
+        o4 = self._orientation(q1, q2, p2)
+
+        if o1 != o2 and o3 != o4:
+            return True
+        if o1 == 0 and self._on_segment(p1, q1, p2):
+            return True
+        if o2 == 0 and self._on_segment(p1, q2, p2):
+            return True
+        if o3 == 0 and self._on_segment(q1, p1, q2):
+            return True
+        if o4 == 0 and self._on_segment(q1, p2, q2):
+            return True
+        return False
+
+    def _segment_intersects_rect(
+        self,
+        p1: np.ndarray,
+        p2: np.ndarray,
+        x_min: float,
+        y_min: float,
+        x_max: float,
+        y_max: float,
+    ) -> bool:
+        if self._point_in_rect(p1, x_min, y_min, x_max, y_max) or self._point_in_rect(
+            p2, x_min, y_min, x_max, y_max
+        ):
+            return True
+
+        corners = (
+            np.array([x_min, y_min], dtype=np.float32),
+            np.array([x_max, y_min], dtype=np.float32),
+            np.array([x_max, y_max], dtype=np.float32),
+            np.array([x_min, y_max], dtype=np.float32),
+        )
+        edges = (
+            (corners[0], corners[1]),
+            (corners[1], corners[2]),
+            (corners[2], corners[3]),
+            (corners[3], corners[0]),
+        )
+        for q1, q2 in edges:
+            if self._segments_intersect(p1, p2, q1, q2):
+                return True
+        return False
+
+    def compute_occmap(
+        self,
+        robot_pos: np.ndarray,
+        robot_heading: float,
+        obstacles: Optional[np.ndarray] = None,
+        segment_obstacles: Optional[np.ndarray] = None,
+    ) -> np.ndarray:
+        """Compute a 10x10 occupancy map in the robot frame with 1m cells."""
+        occmap = np.zeros((self.OCCMAP_GRID_SIZE, self.OCCMAP_GRID_SIZE), dtype=np.uint8)
+
+        local_circles = [
+            (self._world_to_robot_frame(center, robot_pos, robot_heading), float(radius))
+            for center, radius in self._iter_circle_obstacles(obstacles)
+        ]
+        local_segments = [
+            (
+                self._world_to_robot_frame(p1, robot_pos, robot_heading),
+                self._world_to_robot_frame(p2, robot_pos, robot_heading),
+            )
+            for p1, p2 in self._iter_segment_obstacles(segment_obstacles)
+        ]
+
+        half_extent = self.OCCMAP_HALF_EXTENT
+        cell_size = self.OCCMAP_CELL_SIZE
+
+        for row in range(self.OCCMAP_GRID_SIZE):
+            x_max = half_extent - row * cell_size
+            x_min = x_max - cell_size
+            for col in range(self.OCCMAP_GRID_SIZE):
+                y_max = half_extent - col * cell_size
+                y_min = y_max - cell_size
+
+                occupied = False
+                for center, radius in local_circles:
+                    if self._circle_intersects_rect(center, radius, x_min, y_min, x_max, y_max):
+                        occupied = True
+                        break
+
+                if not occupied:
+                    for p1, p2 in local_segments:
+                        if self._segment_intersects_rect(p1, p2, x_min, y_min, x_max, y_max):
+                            occupied = True
+                            break
+
+                if occupied:
+                    occmap[row, col] = 1
+
+        self.last_occmap = occmap
+        return occmap
+
+    def get_last_occmap(self) -> np.ndarray:
+        """Return a copy of the most recently computed occupancy map."""
+        return self.last_occmap.copy()
+
+    def draw_occmap(self, occmap: np.ndarray, x: Optional[int] = None, y: Optional[int] = None):
+        """Draw an inset 10x10 occupancy map in the robot frame."""
+        if occmap is None or occmap.size == 0:
+            return
+
+        cell_px = 24
+        map_px = self.OCCMAP_GRID_SIZE * cell_px
+        header_h = 72
+        pad = 14
+        panel_width = map_px + pad * 2
+        panel_height = header_h + map_px + pad
+
+        if x is None:
+            x = self.width - panel_width - 15
+        if y is None:
+            y = self.height - panel_height - 15
+
+        panel_rect = pygame.Rect(x, y, panel_width, panel_height)
+        pygame.draw.rect(self.screen, self.COLORS["occmap_panel"], panel_rect, border_radius=10)
+        pygame.draw.rect(self.screen, (74, 82, 102), panel_rect, 2, border_radius=10)
+
+        title = self.font.render("Occ Map (robot frame)", True, self.COLORS["occmap_text"])
+        subtitle = self.font.render("10x10, 1m / cell", True, (170, 180, 195))
+        occupied_cells = int(np.sum(occmap))
+        status = self.font.render(f"Occupied: {occupied_cells}", True, (170, 180, 195))
+        self.screen.blit(title, (x + pad, y + 10))
+        self.screen.blit(subtitle, (x + pad, y + 34))
+        self.screen.blit(status, (x + pad, y + 56))
+
+        grid_x = x + pad
+        grid_y = y + header_h
+        grid_rect = pygame.Rect(grid_x, grid_y, map_px, map_px)
+        pygame.draw.rect(self.screen, (26, 30, 38), grid_rect, border_radius=6)
+
+        for row in range(self.OCCMAP_GRID_SIZE):
+            for col in range(self.OCCMAP_GRID_SIZE):
+                rect = pygame.Rect(
+                    grid_x + col * cell_px,
+                    grid_y + row * cell_px,
+                    cell_px,
+                    cell_px,
+                )
+                color = self.COLORS["occmap_occ"] if occmap[row, col] else self.COLORS["occmap_free"]
+                pygame.draw.rect(self.screen, color, rect)
+                pygame.draw.rect(self.screen, self.COLORS["occmap_grid"], rect, 1)
+
+        center_x = grid_x + map_px / 2
+        center_y = grid_y + map_px / 2
+        pygame.draw.line(
+            self.screen,
+            self.COLORS["occmap_axis"],
+            (int(center_x), grid_y),
+            (int(center_x), grid_y + map_px),
+            2,
+        )
+        pygame.draw.line(
+            self.screen,
+            self.COLORS["occmap_axis"],
+            (grid_x, int(center_y)),
+            (grid_x + map_px, int(center_y)),
+            2,
+        )
+
+        robot_marker = [
+            (int(center_x), int(center_y - 10)),
+            (int(center_x - 8), int(center_y + 8)),
+            (int(center_x + 8), int(center_y + 8)),
+        ]
+        pygame.draw.polygon(self.screen, self.COLORS["occmap_robot"], robot_marker)
+        pygame.draw.polygon(self.screen, (255, 255, 255), robot_marker, 2)
+
+        axis_color = self.COLORS["occmap_axis"]
+        front_label = self.font.render("+x/front", True, axis_color)
+        left_label = self.font.render("+y/left", True, axis_color)
+        self.screen.blit(front_label, (int(center_x - front_label.get_width() / 2), grid_y - 24))
+        self.screen.blit(left_label, (grid_x + 6, int(center_y - left_label.get_height() / 2)))
+
     def draw_path(self, path: np.ndarray, color: tuple, width: int = 2):
         """Draw path"""
         if len(path) < 2:
@@ -744,6 +1036,13 @@ class Visualizer:
         flip: bool = True
     ):
         """Render one frame. Set flip=False to manually control display update."""
+        occmap = self.compute_occmap(
+            robot_pos=robot_pos,
+            robot_heading=robot_heading,
+            obstacles=obstacles,
+            segment_obstacles=segment_obstacles,
+        )
+
         # Update camera
         self.update_camera(robot_pos)
         
@@ -834,6 +1133,9 @@ class Visualizer:
             self.draw_radius(human_pos, human_radius, self.COLORS['human_radius'])
         self.draw_human(human_pos)
         self.draw_robot(robot_pos, robot_heading)
+
+        if self.layer_visibility.get("occmap", True):
+            self.draw_occmap(occmap)
         
         # Draw UI
         if info is not None:
