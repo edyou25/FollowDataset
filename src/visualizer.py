@@ -8,6 +8,10 @@ from typing import Optional
 
 class Visualizer:
     """Visualization interface for data collection"""
+
+    RAYCAST_RES_DEG = 3.6
+    RAYCAST_BEAM_COUNT = int(round(360.0 / RAYCAST_RES_DEG))
+    RAYCAST_MAX_RANGE = 10.0
     
     # Color definitions
     COLORS = {
@@ -33,6 +37,13 @@ class Visualizer:
         'obstacle_obs': (255, 60, 60),
         'clear_safe': (80, 220, 120),
         'clear_warn': (255, 200, 80),
+        'raycast_hit': (120, 240, 255),
+        'raycast_miss': (70, 110, 130),
+        'raycast_panel': (34, 38, 48),
+        'raycast_grid': (92, 104, 122),
+        'raycast_text': (230, 230, 230),
+        'raycast_outline': (150, 220, 255),
+        'raycast_robot': (255, 220, 120),
     }
     
     # Zoom settings
@@ -65,6 +76,8 @@ class Visualizer:
         # Layer visibility (click legend to toggle)
         self.layer_visibility = {
             "grid": True,
+            "raycast_map": True,
+            "raycast_beams": True,
             "reference_path": True,
             "planned_path": True,
             "lookahead_points": True,
@@ -81,6 +94,14 @@ class Visualizer:
         }
         self._legend_hitboxes: dict[str, pygame.Rect] = {}
         self._legend_hover_key: Optional[str] = None
+        self.raycast_angles = np.deg2rad(
+            np.arange(self.RAYCAST_BEAM_COUNT, dtype=np.float32) * self.RAYCAST_RES_DEG
+        ).astype(np.float32)
+        self.last_raycast_ranges = np.full(
+            (self.RAYCAST_BEAM_COUNT,), self.RAYCAST_MAX_RANGE, dtype=np.float32
+        )
+        self.last_raycast_hit_points = np.zeros((self.RAYCAST_BEAM_COUNT, 2), dtype=np.float32)
+        self.last_raycast_hit_mask = np.zeros((self.RAYCAST_BEAM_COUNT,), dtype=bool)
         
     def world_to_screen(self, world_pos: np.ndarray) -> tuple:
         """Convert world coordinates to screen coordinates"""
@@ -115,6 +136,8 @@ class Visualizer:
     def _legend_items(self) -> list[dict]:
         return [
             {"key": "grid", "label": "Grid", "color": self.COLORS["grid"]},
+            {"key": "raycast_map", "label": "Raycast Map", "color": self.COLORS["raycast_outline"]},
+            {"key": "raycast_beams", "label": "Raycast Beams", "color": self.COLORS["raycast_hit"]},
             {"key": "reference_path", "label": "Ref Path", "color": self.COLORS["path_ref"]},
             {"key": "planned_path", "label": "Planned Path", "color": self.COLORS["path_plan"]},
             {"key": "lookahead_points", "label": "Lookahead", "color": self.COLORS["lookahead"]},
@@ -225,6 +248,269 @@ class Visualizer:
             start = self.world_to_screen(np.array([-100, y]))
             end = self.world_to_screen(np.array([100, y]))
             pygame.draw.line(self.screen, self.COLORS['grid'], start, end, 1)
+
+    def _iter_circle_obstacles(self, obstacles):
+        if obstacles is None or len(obstacles) == 0:
+            return
+        for obs in obstacles:
+            if isinstance(obs, dict):
+                x = float(obs.get("x", 0.0))
+                y = float(obs.get("y", 0.0))
+                r = float(obs.get("r", 0.0))
+            else:
+                x = float(obs[0])
+                y = float(obs[1])
+                r = float(obs[2])
+            yield np.array([x, y], dtype=np.float32), r
+
+    def _iter_segment_obstacles(self, segments):
+        if segments is None or len(segments) == 0:
+            return
+        for seg in segments:
+            if isinstance(seg, dict):
+                if "p1" in seg and "p2" in seg:
+                    p1 = np.array(seg["p1"], dtype=np.float32)
+                    p2 = np.array(seg["p2"], dtype=np.float32)
+                else:
+                    x1 = float(seg.get("x1", 0.0))
+                    y1 = float(seg.get("y1", 0.0))
+                    x2 = float(seg.get("x2", 0.0))
+                    y2 = float(seg.get("y2", 0.0))
+                    p1 = np.array([x1, y1], dtype=np.float32)
+                    p2 = np.array([x2, y2], dtype=np.float32)
+            else:
+                p1 = np.array([seg[0], seg[1]], dtype=np.float32)
+                p2 = np.array([seg[2], seg[3]], dtype=np.float32)
+            yield p1, p2
+
+    @staticmethod
+    def _cross_2d(a: np.ndarray, b: np.ndarray) -> float:
+        return float(a[0] * b[1] - a[1] * b[0])
+
+    def _ray_circle_intersection_distance(
+        self,
+        origin: np.ndarray,
+        direction: np.ndarray,
+        center: np.ndarray,
+        radius: float,
+    ) -> Optional[float]:
+        oc = origin - center
+        b = 2.0 * float(np.dot(direction, oc))
+        c = float(np.dot(oc, oc) - radius * radius)
+        discriminant = b * b - 4.0 * c
+        if discriminant < 0.0:
+            return None
+        sqrt_disc = float(np.sqrt(discriminant))
+        t1 = (-b - sqrt_disc) / 2.0
+        t2 = (-b + sqrt_disc) / 2.0
+        if t1 >= 0.0:
+            return t1
+        if t2 >= 0.0:
+            return t2
+        return None
+
+    def _ray_segment_intersection_distance(
+        self,
+        origin: np.ndarray,
+        direction: np.ndarray,
+        p1: np.ndarray,
+        p2: np.ndarray,
+        eps: float = 1e-6,
+    ) -> Optional[float]:
+        seg = p2 - p1
+        denom = self._cross_2d(direction, seg)
+        diff = p1 - origin
+
+        if abs(denom) < eps:
+            # Collinear overlap is rare, but when it happens we take the nearest
+            # segment endpoint that lies in front of the ray origin.
+            if abs(self._cross_2d(diff, direction)) >= eps:
+                return None
+            t1 = float(np.dot(p1 - origin, direction))
+            t2 = float(np.dot(p2 - origin, direction))
+            candidates = [t for t in (t1, t2) if t >= 0.0]
+            return min(candidates) if candidates else None
+
+        t = self._cross_2d(diff, seg) / denom
+        u = self._cross_2d(diff, direction) / denom
+        if t >= 0.0 and 0.0 <= u <= 1.0:
+            return float(t)
+        return None
+
+    def compute_raycast_map(
+        self,
+        robot_pos: np.ndarray,
+        robot_heading: float,
+        obstacles: Optional[np.ndarray] = None,
+        segment_obstacles: Optional[np.ndarray] = None,
+        max_range: Optional[float] = None,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Compute a 360-degree raycast scan around the robot."""
+        origin = np.asarray(robot_pos, dtype=np.float32)
+        max_range = self.RAYCAST_MAX_RANGE if max_range is None else float(max_range)
+
+        ranges = np.full((self.RAYCAST_BEAM_COUNT,), max_range, dtype=np.float32)
+        hit_points = np.zeros((self.RAYCAST_BEAM_COUNT, 2), dtype=np.float32)
+        hit_mask = np.zeros((self.RAYCAST_BEAM_COUNT,), dtype=bool)
+
+        circles = list(self._iter_circle_obstacles(obstacles))
+        segments = list(self._iter_segment_obstacles(segment_obstacles))
+
+        for i, rel_angle in enumerate(self.raycast_angles):
+            angle_world = float(robot_heading + rel_angle)
+            direction = np.array(
+                [np.cos(angle_world), np.sin(angle_world)], dtype=np.float32
+            )
+            best_t = max_range
+            hit = False
+
+            for center, radius in circles:
+                t = self._ray_circle_intersection_distance(origin, direction, center, radius)
+                if t is not None and t < best_t:
+                    best_t = t
+                    hit = True
+
+            for p1, p2 in segments:
+                t = self._ray_segment_intersection_distance(origin, direction, p1, p2)
+                if t is not None and t < best_t:
+                    best_t = t
+                    hit = True
+
+            ranges[i] = best_t
+            hit_points[i] = origin + direction * best_t
+            hit_mask[i] = hit
+
+        self.last_raycast_ranges = ranges
+        self.last_raycast_hit_points = hit_points
+        self.last_raycast_hit_mask = hit_mask
+        return ranges, hit_points, hit_mask
+
+    def get_last_raycast_map(self) -> np.ndarray:
+        """Return a copy of the most recent raycast distance vector."""
+        return self.last_raycast_ranges.copy()
+
+    def draw_raycast_beams(
+        self,
+        robot_pos: np.ndarray,
+        hit_points: np.ndarray,
+        hit_mask: np.ndarray,
+    ):
+        """Draw raycast beams in the world view."""
+        if hit_points is None or len(hit_points) == 0:
+            return
+
+        robot_screen = self.world_to_screen(robot_pos)
+        for point, hit in zip(hit_points, hit_mask):
+            end_screen = self.world_to_screen(point)
+            color = self.COLORS["raycast_hit"] if hit else self.COLORS["raycast_miss"]
+            width = 2 if hit else 1
+            pygame.draw.line(self.screen, color, robot_screen, end_screen, width)
+            if hit:
+                pygame.draw.circle(self.screen, self.COLORS["raycast_hit"], end_screen, 3)
+
+    def draw_raycast_map(
+        self,
+        ranges: np.ndarray,
+        hit_mask: np.ndarray,
+        x: Optional[int] = None,
+        y: Optional[int] = None,
+        max_range: Optional[float] = None,
+    ):
+        """Draw a polar inset for the raycast map."""
+        if ranges is None or len(ranges) == 0:
+            return
+
+        max_range = self.RAYCAST_MAX_RANGE if max_range is None else float(max_range)
+        panel_width = 320
+        panel_height = 380
+        pad = 16
+        circle_radius = 120
+
+        if x is None:
+            x = self.width - panel_width - 15
+        if y is None:
+            y = self.height - panel_height - 15
+
+        panel_rect = pygame.Rect(x, y, panel_width, panel_height)
+        pygame.draw.rect(self.screen, self.COLORS["raycast_panel"], panel_rect, border_radius=10)
+        pygame.draw.rect(self.screen, (74, 82, 102), panel_rect, 2, border_radius=10)
+
+        title = self.font.render("Raycast Map", True, self.COLORS["raycast_text"])
+        subtitle = self.font.render(
+            f"{self.RAYCAST_BEAM_COUNT} rays @ {self.RAYCAST_RES_DEG:.1f}deg",
+            True,
+            (170, 180, 195),
+        )
+        min_range = float(np.min(ranges)) if len(ranges) > 0 else max_range
+        status = self.font.render(
+            f"min {min_range:.2f}m / max {max_range:.1f}m",
+            True,
+            (170, 180, 195),
+        )
+        self.screen.blit(title, (x + pad, y + 12))
+        self.screen.blit(subtitle, (x + pad, y + 40))
+        self.screen.blit(status, (x + pad, y + 68))
+
+        center_x = x + panel_width // 2
+        center_y = y + 230
+        scale = circle_radius / max_range
+
+        for ratio in (0.25, 0.5, 0.75, 1.0):
+            radius_px = int(circle_radius * ratio)
+            pygame.draw.circle(
+                self.screen,
+                self.COLORS["raycast_grid"],
+                (center_x, center_y),
+                radius_px,
+                1,
+            )
+
+        pygame.draw.line(
+            self.screen,
+            self.COLORS["raycast_grid"],
+            (center_x, center_y - circle_radius),
+            (center_x, center_y + circle_radius),
+            1,
+        )
+        pygame.draw.line(
+            self.screen,
+            self.COLORS["raycast_grid"],
+            (center_x - circle_radius, center_y),
+            (center_x + circle_radius, center_y),
+            1,
+        )
+
+        points = []
+        for rel_angle, ray_range, hit in zip(self.raycast_angles, ranges, hit_mask):
+            local_x = float(np.cos(rel_angle) * ray_range)
+            local_y = float(np.sin(rel_angle) * ray_range)
+            px = center_x - int(local_y * scale)
+            py = center_y - int(local_x * scale)
+            points.append((px, py))
+            color = self.COLORS["raycast_hit"] if hit else self.COLORS["raycast_miss"]
+            pygame.draw.circle(self.screen, color, (px, py), 2)
+
+        if len(points) >= 2:
+            pygame.draw.lines(self.screen, self.COLORS["raycast_outline"], True, points, 2)
+
+        robot_marker = [
+            (center_x, center_y - 10),
+            (center_x - 8, center_y + 8),
+            (center_x + 8, center_y + 8),
+        ]
+        pygame.draw.polygon(self.screen, self.COLORS["raycast_robot"], robot_marker)
+        pygame.draw.polygon(self.screen, (255, 255, 255), robot_marker, 2)
+
+        label_color = self.COLORS["raycast_text"]
+        labels = [
+            ("front", (center_x - 20, center_y - circle_radius - 24)),
+            ("left", (center_x - circle_radius - 28, center_y - 10)),
+            ("back", (center_x - 20, center_y + circle_radius + 8)),
+            ("right", (center_x + circle_radius - 8, center_y - 10)),
+        ]
+        for text, pos in labels:
+            surface = self.font.render(text, True, label_color)
+            self.screen.blit(surface, pos)
     
     def draw_path(self, path: np.ndarray, color: tuple, width: int = 2):
         """Draw path"""
@@ -744,6 +1030,13 @@ class Visualizer:
         flip: bool = True
     ):
         """Render one frame. Set flip=False to manually control display update."""
+        raycast_ranges, raycast_hit_points, raycast_hit_mask = self.compute_raycast_map(
+            robot_pos=robot_pos,
+            robot_heading=robot_heading,
+            obstacles=obstacles,
+            segment_obstacles=segment_obstacles,
+        )
+
         # Update camera
         self.update_camera(robot_pos)
         
@@ -828,12 +1121,18 @@ class Visualizer:
         if self.layer_visibility.get("leash", True):
             self.draw_leash(robot_pos, human_pos, leash_tension)
 
+        if self.layer_visibility.get("raycast_beams", True):
+            self.draw_raycast_beams(robot_pos, raycast_hit_points, raycast_hit_mask)
+
         # Draw human and robot
         if self.layer_visibility.get("agent_radii", True):
             self.draw_radius(robot_pos, robot_radius, self.COLORS['robot_radius'])
             self.draw_radius(human_pos, human_radius, self.COLORS['human_radius'])
         self.draw_human(human_pos)
         self.draw_robot(robot_pos, robot_heading)
+
+        if self.layer_visibility.get("raycast_map", True):
+            self.draw_raycast_map(raycast_ranges, raycast_hit_mask)
         
         # Draw UI
         if info is not None:
