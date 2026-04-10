@@ -421,10 +421,10 @@ class Visualizer:
             return
 
         max_range = self.RAYCAST_MAX_RANGE if max_range is None else float(max_range)
-        panel_width = 320
-        panel_height = 380
-        pad = 16
-        circle_radius = 120
+        panel_width = 620
+        panel_height = 720
+        pad = 28
+        circle_radius = 235
 
         if x is None:
             x = self.width - panel_width - 15
@@ -435,7 +435,7 @@ class Visualizer:
         pygame.draw.rect(self.screen, self.COLORS["raycast_panel"], panel_rect, border_radius=10)
         pygame.draw.rect(self.screen, (74, 82, 102), panel_rect, 2, border_radius=10)
 
-        title = self.font.render("Raycast Map", True, self.COLORS["raycast_text"])
+        title = self.font_large.render("Raycast Map", True, self.COLORS["raycast_text"])
         subtitle = self.font.render(
             f"{self.RAYCAST_BEAM_COUNT} rays @ {self.RAYCAST_RES_DEG:.1f}deg",
             True,
@@ -447,12 +447,12 @@ class Visualizer:
             True,
             (170, 180, 195),
         )
-        self.screen.blit(title, (x + pad, y + 12))
-        self.screen.blit(subtitle, (x + pad, y + 40))
-        self.screen.blit(status, (x + pad, y + 68))
+        self.screen.blit(title, (x + pad, y + 18))
+        self.screen.blit(subtitle, (x + pad, y + 62))
+        self.screen.blit(status, (x + pad, y + 94))
 
         center_x = x + panel_width // 2
-        center_y = y + 230
+        center_y = y + panel_height - circle_radius - 82
         scale = circle_radius / max_range
 
         for ratio in (0.25, 0.5, 0.75, 1.0):
@@ -488,10 +488,10 @@ class Visualizer:
             py = center_y - int(local_x * scale)
             points.append((px, py))
             color = self.COLORS["raycast_hit"] if hit else self.COLORS["raycast_miss"]
-            pygame.draw.circle(self.screen, color, (px, py), 2)
+            pygame.draw.circle(self.screen, color, (px, py), 8)
 
         if len(points) >= 2:
-            pygame.draw.lines(self.screen, self.COLORS["raycast_outline"], True, points, 2)
+            pygame.draw.lines(self.screen, self.COLORS["raycast_outline"], True, points, 4)
 
         robot_marker = [
             (center_x, center_y - 10),
@@ -502,15 +502,17 @@ class Visualizer:
         pygame.draw.polygon(self.screen, (255, 255, 255), robot_marker, 2)
 
         label_color = self.COLORS["raycast_text"]
-        labels = [
-            ("front", (center_x - 20, center_y - circle_radius - 24)),
-            ("left", (center_x - circle_radius - 28, center_y - 10)),
-            ("back", (center_x - 20, center_y + circle_radius + 8)),
-            ("right", (center_x + circle_radius - 8, center_y - 10)),
+        label_anchors = [
+            ("front", "midbottom", (center_x, center_y - circle_radius - 8)),
+            ("left", "midright", (center_x - circle_radius - 10, center_y)),
+            ("back", "midtop", (center_x, center_y + circle_radius + 8)),
+            ("right", "midleft", (center_x + circle_radius + 10, center_y)),
         ]
-        for text, pos in labels:
+        for text, anchor_attr, anchor_pos in label_anchors:
             surface = self.font.render(text, True, label_color)
-            self.screen.blit(surface, pos)
+            rect = surface.get_rect()
+            setattr(rect, anchor_attr, anchor_pos)
+            self.screen.blit(surface, rect)
     
     def draw_path(self, path: np.ndarray, color: tuple, width: int = 2):
         """Draw path"""

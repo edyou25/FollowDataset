@@ -9,6 +9,7 @@ Controls:
     S     Save trajectory
     R     Reset position
     N     Generate new path
+    O     Add obstacle ahead
     ESC   Exit
 """
 import sys
@@ -21,6 +22,7 @@ from src.physics import PhysicsEngine
 from src.visualizer import Visualizer
 from src.data_storage import DataStorage
 from src.scoring import TrajectoryScorer
+from src.dynamic_obstacles import append_forward_circle_obstacle
 
 
 class DataCollector:
@@ -57,6 +59,8 @@ class DataCollector:
         self.running = True
         self.recording = False
         self.current_path_data = None
+        self.forward_obstacle_distance = max(2.0, leash_length + 0.5)
+        self.forward_obstacle_radius = float(getattr(self.path_generator, "obstacle_radius", 0.3))
         
         # Trajectory cache (for visualization)
         self.robot_trajectory = []
@@ -144,6 +148,25 @@ class DataCollector:
                 self.scorer.reset()
         except Exception as e:
             print(f"Save failed: {e}")
+
+    def _spawn_forward_obstacle(self):
+        """Add a circle obstacle on the robot's forward center line."""
+        if self.current_path_data is None:
+            print("No active path. Generate a path first.")
+            return
+
+        obstacles, center = append_forward_circle_obstacle(
+            obstacles=self.current_path_data.get("obstacles"),
+            robot_pos=self.physics.robot.position,
+            heading=self.physics.robot.heading,
+            radius=self.forward_obstacle_radius,
+            base_distance=self.forward_obstacle_distance,
+        )
+        self.current_path_data["obstacles"] = obstacles
+        print(
+            f"Added obstacle #{len(obstacles) - 1} at "
+            f"({center[0]:.2f}, {center[1]:.2f}), r={self.forward_obstacle_radius:.2f}m"
+        )
     
     def _handle_input(self):
         """Handle keyboard input"""
@@ -172,6 +195,9 @@ class DataCollector:
                 
                 elif event.key == pygame.K_n:
                     self._generate_new_path()
+
+                elif event.key == pygame.K_o:
+                    self._spawn_forward_obstacle()
         
         # Continuous key detection
         keys = pygame.key.get_pressed()
@@ -244,6 +270,16 @@ class DataCollector:
             'scores': scores,
             'robot_radius': self.physics.robot_radius,
             'human_radius': self.physics.human_radius,
+            'controls': [
+                "Arrows: Move",
+                "SPACE: Record",
+                "S: Save",
+                "R: Reset",
+                "N: New Path",
+                "O: Add Obstacle",
+                "Scroll: Zoom",
+                "ESC: Exit",
+            ],
         }
         
         self.visualizer.render(
@@ -269,7 +305,7 @@ class DataCollector:
         print("=" * 50)
         print("Guide Dog Robot Data Collection Tool")
         print("=" * 50)
-        print("Controls: Arrows=Move | SPACE=Record | S=Save | R=Reset | N=NewPath | ESC=Exit")
+        print("Controls: Arrows=Move | SPACE=Record | S=Save | R=Reset | N=NewPath | O=AddObstacle | ESC=Exit")
         print("=" * 50)
         
         while self.running:

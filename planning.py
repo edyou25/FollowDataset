@@ -7,6 +7,7 @@ Controls:
     SPACE Pause/Resume
     R     Reset position
     N     Generate new path
+    O     Add obstacle ahead
     ESC   Exit
     Arrows Manual control (when policy disabled)
 """
@@ -42,6 +43,7 @@ from src.path_generator import PathGenerator
 from src.physics import PhysicsEngine
 from src.visualizer import Visualizer
 from src.scoring import TrajectoryScorer
+from src.dynamic_obstacles import append_forward_circle_obstacle
 
 
 def _resolve_class(dotted_path: str):
@@ -339,6 +341,8 @@ class ModelPlanner:
         self.running = True
         self.paused = False
         self.use_policy = False
+        self.forward_obstacle_distance = max(2.0, leash_length + 0.5)
+        self.forward_obstacle_radius = float(getattr(self.path_generator, "obstacle_radius", 0.3))
         self.collision_pause = False
         self.collision_happened = False
         self.collision_info = None
@@ -489,6 +493,37 @@ class ModelPlanner:
             self.obs_history.append(obs.copy())
         self.prev_robot_pos = robot_pos.copy()
 
+    def _spawn_forward_obstacle(self):
+        """Add a circle obstacle on the robot's forward center line."""
+        if self.current_path_data is None:
+            print("No active path. Generate a path first.")
+            return
+
+        obstacles, center = append_forward_circle_obstacle(
+            obstacles=self.current_path_data.get("obstacles"),
+            robot_pos=self.physics.robot.position,
+            heading=self.physics.robot.heading,
+            radius=self.forward_obstacle_radius,
+            base_distance=self.forward_obstacle_distance,
+        )
+        self.current_path_data["obstacles"] = obstacles
+        self._log_event(
+            "spawn_obstacle",
+            {
+                "type": "circle",
+                "obstacle_idx": int(len(obstacles) - 1),
+                "obstacle": [
+                    float(center[0]),
+                    float(center[1]),
+                    float(self.forward_obstacle_radius),
+                ],
+            },
+        )
+        print(
+            f"Added obstacle #{len(obstacles) - 1} at "
+            f"({center[0]:.2f}, {center[1]:.2f}), r={self.forward_obstacle_radius:.2f}m"
+        )
+
     def _log_event(self, name: str, extra: Optional[dict] = None):
         if self.log_fp is None:
             return
@@ -572,6 +607,8 @@ class ModelPlanner:
                     print("Position reset")
                 elif event.key == pygame.K_n:
                     self._generate_new_path()
+                elif event.key == pygame.K_o:
+                    self._spawn_forward_obstacle()
                 elif event.key == pygame.K_p:
                     if self.policy is not None:
                         self.use_policy = not self.use_policy
@@ -1293,6 +1330,7 @@ class ModelPlanner:
                 "SPACE: Pause",
                 "R: Reset",
                 "N: New Path",
+                "O: Add Obstacle",
                 "Arrows: Manual control",
                 "Scroll: Zoom",
                 "ESC: Exit",
@@ -1338,7 +1376,7 @@ class ModelPlanner:
         print("=" * 60)
         print("Guide Dog Robot Planning Tool")
         print("=" * 60)
-        print("Controls: P=Policy/Manual | SPACE=Pause | R=Reset | N=NewPath | ESC=Exit")
+        print("Controls: P=Policy/Manual | SPACE=Pause | R=Reset | N=NewPath | O=AddObstacle | ESC=Exit")
         print("=" * 60)
 
         while self.running:
