@@ -15,6 +15,8 @@ class Visualizer:
         'grid': (45, 45, 55),
         'path_ref': (80, 200, 120),      # Reference path - green
         'path_plan': (220, 200, 80),     # Planned path - yellow
+        'path_plan_raw': (90, 210, 255), # Raw diffusion path - cyan
+        'path_plan_qp': (255, 170, 70),  # QP-filtered path - orange
         'lookahead': (255, 240, 120),    # Lookahead points - bright yellow
         'path_robot': (255, 100, 100),   # Robot trajectory - red
         'path_human': (100, 150, 255),   # Human trajectory - blue
@@ -67,6 +69,8 @@ class Visualizer:
             "grid": True,
             "reference_path": True,
             "planned_path": True,
+            "nominal_planned_path": True,
+            "safe_planned_path": True,
             "lookahead_points": True,
             "robot_trajectory": True,
             "human_trajectory": True,
@@ -116,7 +120,8 @@ class Visualizer:
         return [
             {"key": "grid", "label": "Grid", "color": self.COLORS["grid"]},
             {"key": "reference_path", "label": "Ref Path", "color": self.COLORS["path_ref"]},
-            {"key": "planned_path", "label": "Planned Path", "color": self.COLORS["path_plan"]},
+            {"key": "nominal_planned_path", "label": "Diffusion Raw", "color": self.COLORS["path_plan_raw"]},
+            {"key": "safe_planned_path", "label": "QP Path", "color": self.COLORS["path_plan_qp"]},
             {"key": "lookahead_points", "label": "Lookahead", "color": self.COLORS["lookahead"]},
             {"key": "robot_trajectory", "label": "Robot Trail", "color": self.COLORS["path_robot"]},
             {"key": "human_trajectory", "label": "Human Trail", "color": self.COLORS["path_human"]},
@@ -727,6 +732,8 @@ class Visualizer:
         robot_trajectory: Optional[np.ndarray] = None,
         human_trajectory: Optional[np.ndarray] = None,
         planned_path: Optional[np.ndarray] = None,
+        nominal_planned_path: Optional[np.ndarray] = None,
+        safe_planned_path: Optional[np.ndarray] = None,
         lookahead_points: Optional[np.ndarray] = None,
         obstacles: Optional[np.ndarray] = None,
         segment_obstacles: Optional[np.ndarray] = None,
@@ -796,9 +803,21 @@ class Visualizer:
                     obs_segment_obstacles=obs_segment_obstacles,
                 )
 
-        # Draw planned path
+        # Draw planning overlays
+        if nominal_planned_path is not None and len(nominal_planned_path) > 1:
+            if self.layer_visibility.get("nominal_planned_path", True):
+                self.draw_path(nominal_planned_path, self.COLORS['path_plan_raw'], 2)
+
+        if safe_planned_path is not None and len(safe_planned_path) > 1:
+            if self.layer_visibility.get("safe_planned_path", True):
+                self.draw_path(safe_planned_path, self.COLORS['path_plan_qp'], 3)
+
         if planned_path is not None and len(planned_path) > 1:
-            if self.layer_visibility.get("planned_path", True):
+            if (
+                safe_planned_path is None
+                and nominal_planned_path is None
+                and self.layer_visibility.get("planned_path", True)
+            ):
                 self.draw_path(planned_path, self.COLORS['path_plan'], 2)
 
         # Draw lookahead points

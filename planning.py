@@ -7,6 +7,7 @@ Controls:
     SPACE Pause/Resume
     R     Reset position
     N     Generate new path
+    O     Add obstacle ahead
     ESC   Exit
     Arrows Manual control (when policy disabled)
 """
@@ -42,6 +43,7 @@ from src.path_generator import PathGenerator
 from src.physics import PhysicsEngine
 from src.visualizer import Visualizer
 from src.scoring import TrajectoryScorer
+from src.safety_filter import QPSafetyFilter
 
 
 def _resolve_class(dotted_path: str):
@@ -89,6 +91,26 @@ def resolve_device(device: str) -> torch.device:
     return torch.device(device)
 
 
+def normalize_safety_mode(mode: Optional[str]) -> str:
+    mode = str(mode or "off").lower()
+    aliases = {
+        "off": "off",
+        "none": "off",
+        "diffusion": "off",
+        "qp": "robot_qp",
+        "robot": "robot_qp",
+        "robot_qp": "robot_qp",
+        "human_robot": "human_robot_qp",
+        "human_robot_qp": "human_robot_qp",
+        "human+robot": "human_robot_qp",
+    }
+    if mode not in aliases:
+        raise ValueError(
+            f"Unsupported safety_mode={mode!r} (expected off, robot_qp, or human_robot_qp)"
+        )
+    return aliases[mode]
+
+
 class ModelPlanner:
     """Run simulation and control robot with a trained policy."""
 
@@ -101,8 +123,12 @@ class ModelPlanner:
         k_lookahead: Optional[int] = None,
         frame_stride: Optional[int] = None,
         path_length: float = 50.0,
+        corridor_width: float = 2.5,
+        obstacle_radius: float = 0.3,
         leash_length: float = 1.5,
-        robot_speed: float = 1.5,
+        robot_speed: float = 1.0,
+        robot_radius: float = 0.3,
+        human_radius: float = 0.3,
         fps: int = 20,
         inference_steps: int = 8,
         turn_gain: float = 1.2,
@@ -114,13 +140,26 @@ class ModelPlanner:
         visualizer: Optional[Visualizer] = None,
         create_visualizer: bool = True,
         collision_behavior: str = "reset",
+        safety_mode: str = "off",
+        safety_margin: float = 0.02,
+        safety_alpha: float = 1.0,
+        safety_max_constraints: int = 8,
+        safety_influence_distance: float = 1.0,
+        debug_preview: bool = False,
+        debug_preview_limit: int = 5,
+        debug_policy: bool = False,
+        debug_qp_log: bool = True,
     ):
         self.fps = fps
         self.sim_dt = 1.0 / fps
         self.leash_length = leash_length
 
         # Initialize modules
-        self.path_generator = PathGenerator(target_length=path_length)
+        self.path_generator = PathGenerator(
+            target_length=path_length,
+            corridor_width=corridor_width,
+            obstacle_radius=obstacle_radius,
+        )
         self.visualizer: Optional[Visualizer] = visualizer
         if self.visualizer is None and create_visualizer:
             self.visualizer = Visualizer()
@@ -332,6 +371,8 @@ class ModelPlanner:
             leash_length=leash_length,
             robot_speed=robot_speed,
             dt=self.sim_dt,
+            robot_radius=robot_radius,
+            human_radius=human_radius,
         )
 
         self.scorer = None
@@ -354,6 +395,8 @@ class ModelPlanner:
         self.robot_trajectory = []
         self.human_trajectory = []
         self.planned_path = None
+        self.nominal_planned_path = None
+        self.safe_planned_path = None
         self.lookahead_world = None
         self.frame_count = 0
         self.prev_robot_pos = None
@@ -365,6 +408,9 @@ class ModelPlanner:
         
         # Performance optimization: cache actions and reduce inference frequency
         self.cached_action_seq = None
+        self.cached_nominal_delta_seq = None
+        self.cached_safe_delta_seq = None
+        self.cached_safety_info_seq = None
         self.cached_action_idx = 0
         self.inference_interval = max(1, self.n_action_steps // 2)  # Infer every N frames
         self.frames_since_inference = 0
@@ -376,6 +422,41 @@ class ModelPlanner:
         self.curvature_scale = float(curvature_scale)
         self.min_speed_scale = float(min_speed_scale)
         self.current_speed_scale = 1.0
+        self.safety_mode = normalize_safety_mode(safety_mode)
+        self.safety_filter = QPSafetyFilter(
+            margin=float(safety_margin),
+            alpha=float(safety_alpha),
+            max_constraints=int(safety_max_constraints),
+            influence_distance=float(safety_influence_distance),
+        )
+        self.safety_stop_clearance = max(0.0, float(safety_margin) * 0.75)
+        self.safety_backoff_scales = (1.0, 0.75, 0.5, 0.25, 0.0)
+        self.last_safety_stats = {
+            "applied": False,
+            "modified_steps": 0,
+            "total_steps": 0,
+            "mean_shift": 0.0,
+            "constraint_count": 0,
+            "min_clearance": float("inf"),
+        }
+        self.episode_safety_stats = {
+            "modified_steps": 0,
+            "total_steps": 0,
+            "total_shift": 0.0,
+            "constraint_count": 0,
+            "min_clearance": float("inf"),
+        }
+        if self.safety_mode != "off" and self.action_mode not in ("forward_heading", "delta", "velocity"):
+            print(
+                f"[warn] safety_mode={self.safety_mode} is only supported for "
+                f"forward_heading/delta/velocity; disabling for action_mode={self.action_mode}"
+            )
+            self.safety_mode = "off"
+        self.debug_preview = bool(debug_preview)
+        self.debug_preview_limit = max(1, int(debug_preview_limit))
+        self.debug_policy = bool(debug_policy)
+        self.debug_qp_log = bool(debug_qp_log)
+        self.debug_inference_count = 0
         
         # Reduce inference steps for faster performance
         if self.policy is not None and hasattr(self.policy, 'num_inference_steps'):
@@ -401,6 +482,10 @@ class ModelPlanner:
                     "robot_speed": float(self.physics.robot_speed),
                     "turn_speed": float(self.physics.turn_speed),
                     "leash_length": float(self.leash_length),
+                    "corridor_width": float(self.path_generator.corridor_width),
+                    "obstacle_radius": float(self.path_generator.obstacle_radius),
+                    "robot_radius": float(self.physics.robot_radius),
+                    "human_radius": float(self.physics.human_radius),
                     "action_mode": self.action_mode,
                     "robot_frame": bool(self.robot_frame),
                     "robot_state": self.robot_state,
@@ -419,6 +504,12 @@ class ModelPlanner:
                     "curvature_slowdown": bool(self.curvature_slowdown),
                     "curvature_scale": float(self.curvature_scale),
                     "min_speed_scale": float(self.min_speed_scale),
+                    "safety_mode": self.safety_mode,
+                    "safety_margin": float(self.safety_filter.margin),
+                    "safety_alpha": float(self.safety_filter.alpha),
+                    "safety_max_constraints": int(self.safety_filter.max_constraints),
+                    "safety_influence_distance": float(self.safety_filter.influence_distance),
+                    "debug_qp_log": bool(self.debug_qp_log),
                 },
             )
 
@@ -446,6 +537,10 @@ class ModelPlanner:
                 "path_length": float(self.current_path_data["length"]),
                 "obstacle_count": obstacle_count,
                 "segment_obstacle_count": segment_count,
+                "start": self._rounded_list(self.current_path_data.get("start")),
+                "end": self._rounded_list(self.current_path_data.get("end")),
+                "obstacles": self._serialize_obstacles(obstacles) if self.debug_qp_log else None,
+                "segment_obstacles": self._serialize_segments(segments) if self.debug_qp_log else None,
             },
         )
         print(f"New path generated: length={self.current_path_data['length']:.1f}m")
@@ -467,6 +562,8 @@ class ModelPlanner:
         self.robot_trajectory = []
         self.human_trajectory = []
         self.planned_path = None
+        self.nominal_planned_path = None
+        self.safe_planned_path = None
         self.frame_count = 0
         self.prev_robot_pos = None
         self._seed_obs_history(self.physics.robot.position, self.physics.human.position)
@@ -474,12 +571,22 @@ class ModelPlanner:
             self.policy.reset()
         # Reset action cache
         self.cached_action_seq = None
+        self.cached_nominal_delta_seq = None
+        self.cached_safe_delta_seq = None
+        self.cached_safety_info_seq = None
         self.cached_action_idx = 0
         self.frames_since_inference = 0
         self.data_step_idx = 0
         self.cached_control = (0.0, 0.0)
         self.current_action = None
         self.current_delta = None
+        self.episode_safety_stats = {
+            "modified_steps": 0,
+            "total_steps": 0,
+            "total_shift": 0.0,
+            "constraint_count": 0,
+            "min_clearance": float("inf"),
+        }
         self._log_event("reset_position", {"robot_pos": self.physics.robot.position.tolist()})
 
     def _seed_obs_history(self, robot_pos: np.ndarray, human_pos: np.ndarray):
@@ -551,6 +658,200 @@ class ModelPlanner:
             payload["delta_world"] = [float(delta[0]), float(delta[1])]
         self.log_fp.write(json.dumps(payload, ensure_ascii=True) + "\n")
         self.log_fp.flush()
+
+    def _rounded_list(self, values: Optional[np.ndarray], decimals: int = 4) -> Optional[list]:
+        if values is None:
+            return None
+        arr = np.asarray(values, dtype=np.float32)
+        if arr.size == 0:
+            return []
+        return np.round(arr, decimals).tolist()
+
+    def _serialize_obstacles(self, obstacles: Optional[np.ndarray], decimals: int = 4) -> list[dict]:
+        if obstacles is None:
+            return []
+        rows: list[dict] = []
+        for idx, obs in enumerate(obstacles):
+            if isinstance(obs, dict):
+                x = float(obs.get("x", 0.0))
+                y = float(obs.get("y", 0.0))
+                r = float(obs.get("r", 0.0))
+            else:
+                x = float(obs[0])
+                y = float(obs[1])
+                r = float(obs[2])
+            rows.append(
+                {
+                    "idx": int(idx),
+                    "x": round(x, decimals),
+                    "y": round(y, decimals),
+                    "r": round(r, decimals),
+                }
+            )
+        return rows
+
+    def _serialize_segments(self, segments: Optional[np.ndarray], decimals: int = 4) -> list[dict]:
+        if segments is None:
+            return []
+        rows: list[dict] = []
+        for idx, seg in enumerate(segments):
+            if isinstance(seg, dict):
+                if "p1" in seg and "p2" in seg:
+                    p1 = np.asarray(seg["p1"], dtype=np.float32)
+                    p2 = np.asarray(seg["p2"], dtype=np.float32)
+                    x1, y1 = float(p1[0]), float(p1[1])
+                    x2, y2 = float(p2[0]), float(p2[1])
+                else:
+                    x1 = float(seg.get("x1", 0.0))
+                    y1 = float(seg.get("y1", 0.0))
+                    x2 = float(seg.get("x2", 0.0))
+                    y2 = float(seg.get("y2", 0.0))
+            else:
+                x1 = float(seg[0])
+                y1 = float(seg[1])
+                x2 = float(seg[2])
+                y2 = float(seg[3])
+            rows.append(
+                {
+                    "idx": int(idx),
+                    "x1": round(x1, decimals),
+                    "y1": round(y1, decimals),
+                    "x2": round(x2, decimals),
+                    "y2": round(y2, decimals),
+                }
+            )
+        return rows
+
+    def _serialize_safety_info(self, safety_info: Optional[dict], decimals: int = 4) -> dict:
+        if safety_info is None:
+            return {}
+
+        payload = {
+            "modified": bool(safety_info.get("modified", False)),
+            "shift": round(float(safety_info.get("shift", 0.0)), decimals),
+            "constraint_count": int(safety_info.get("constraint_count", 0)),
+            "min_clearance": round(float(safety_info.get("min_clearance", float("inf"))), decimals)
+            if np.isfinite(float(safety_info.get("min_clearance", float("inf"))))
+            else "inf",
+        }
+
+        scalar_keys = [
+            "nominal_delta_norm",
+            "qp_delta_norm",
+            "final_delta_norm",
+            "robot_heading",
+            "qp_total_constraint_count",
+            "qp_candidate_count",
+            "backoff_scale",
+            "stop_clearance_threshold",
+        ]
+        for key in scalar_keys:
+            if key in safety_info and safety_info[key] is not None:
+                payload[key] = round(float(safety_info[key]), decimals)
+
+        int_keys = ["qp_constraint_count"]
+        for key in int_keys:
+            if key in safety_info and safety_info[key] is not None:
+                payload[key] = int(safety_info[key])
+
+        bool_keys = [
+            "protect_human",
+            "qp_modified",
+            "qp_ref_feasible",
+            "collision_after_qp",
+            "backoff_applied",
+            "stop_triggered",
+        ]
+        for key in bool_keys:
+            if key in safety_info and safety_info[key] is not None:
+                payload[key] = bool(safety_info[key])
+
+        list_keys = [
+            "robot_pos",
+            "human_pos",
+            "nominal_delta",
+            "qp_delta",
+            "final_delta",
+            "nominal_preview_robot_pos",
+            "nominal_preview_human_pos",
+        ]
+        for key in list_keys:
+            if key in safety_info:
+                payload[key] = self._rounded_list(safety_info.get(key), decimals=decimals)
+
+        text_keys = [
+            "resolution_stage",
+            "stop_reason",
+            "qp_best_candidate_kind",
+        ]
+        for key in text_keys:
+            if key in safety_info and safety_info[key] is not None:
+                payload[key] = str(safety_info[key])
+
+        if "qp_best_candidate_constraints" in safety_info:
+            payload["qp_best_candidate_constraints"] = [
+                int(v) for v in safety_info.get("qp_best_candidate_constraints", [])
+            ]
+
+        if "backoff_attempts" in safety_info:
+            payload["backoff_attempts"] = [
+                {
+                    "scale": round(float(item.get("scale", 0.0)), decimals),
+                    "collided": bool(item.get("collided", False)),
+                    "delta": self._rounded_list(item.get("delta"), decimals=decimals),
+                }
+                for item in safety_info.get("backoff_attempts", [])
+            ]
+
+        if "qp_selected_constraints" in safety_info:
+            payload["qp_selected_constraints"] = [
+                {
+                    "index": int(item.get("index", 0)),
+                    "source": str(item.get("source", "")),
+                    "clearance": round(float(item.get("clearance", 0.0)), decimals),
+                    "predicted_clearance": round(
+                        float(item.get("predicted_clearance", 0.0)), decimals
+                    ),
+                    "h": round(float(item.get("h", 0.0)), decimals),
+                    "g": self._rounded_list(item.get("g"), decimals=decimals),
+                    "ref_violation": round(float(item.get("ref_violation", 0.0)), decimals),
+                }
+                for item in safety_info.get("qp_selected_constraints", [])
+            ]
+        return payload
+
+    def _log_robot_qp_step(
+        self,
+        action_idx: int,
+        action: Optional[np.ndarray],
+        delta: Optional[np.ndarray],
+        forward: float,
+        turn: float,
+        speed_scale: float,
+        safety_info: Optional[dict],
+    ):
+        if (
+            not self.debug_qp_log
+            or self.log_fp is None
+            or self.safety_mode != "robot_qp"
+            or self.action_mode != "forward_heading"
+        ):
+            return
+        payload = {
+            "action_idx": int(action_idx),
+            "cached_action_len": int(len(self.cached_action_seq)) if self.cached_action_seq is not None else 0,
+            "cached_safe_len": int(len(self.cached_safe_delta_seq)) if self.cached_safe_delta_seq is not None else 0,
+            "robot_pos": self._rounded_list(self.physics.robot.position),
+            "human_pos": self._rounded_list(self.physics.human.position),
+            "robot_heading": round(float(self.physics.robot.heading), 4),
+            "action": self._rounded_list(action),
+            "executed_delta": self._rounded_list(delta),
+            "forward_cmd": round(float(forward), 4),
+            "turn_cmd": round(float(turn), 4),
+            "speed_scale": round(float(speed_scale), 4),
+            "safety": self._serialize_safety_info(safety_info),
+        }
+        self._log_event("robot_qp_step", payload)
 
     def _handle_input(self):
         """Handle keyboard input."""
@@ -972,93 +1273,675 @@ class ModelPlanner:
         return closest_points, directions
 
     def _actions_to_path(self, robot_pos: np.ndarray, action_seq: np.ndarray) -> Optional[np.ndarray]:
-        if action_seq.size == 0:
+        if action_seq is None or action_seq.size == 0:
             return None
+
+        pos = np.asarray(robot_pos, dtype=np.float32).copy()
+        heading = float(self.physics.robot.heading)
+        points: list[np.ndarray] = []
+        action_seq = np.asarray(action_seq, dtype=np.float32)
+        obstacles = self.current_path_data.get("obstacles") if self.current_path_data else None
+        segments = self.current_path_data.get("segment_obstacles") if self.current_path_data else None
+
+        for action_idx, act in enumerate(action_seq):
+            step_points, heading, collided = self._rollout_preview_action(
+                pos=pos,
+                heading=heading,
+                action=act,
+                obstacles=obstacles,
+                segment_obstacles=segments,
+            )
+            if step_points:
+                pos = step_points[-1].copy()
+                points.extend(step_points)
+            if self.debug_preview and action_idx < self.debug_preview_limit:
+                end_pos = pos.tolist()
+                print(
+                    "[debug preview] "
+                    f"idx={action_idx} action={np.round(act, 4).tolist()} "
+                    f"end_pos={[round(v, 4) for v in end_pos]} heading={heading:.4f} "
+                    f"collided={collided}"
+                )
+            if collided:
+                break
+
+        if not points:
+            return None
+        return np.stack(points, axis=0)
+
+    def _deltas_to_path(
+        self,
+        delta_seq: np.ndarray,
+        protect_robot: bool = True,
+        protect_human: Optional[bool] = None,
+    ) -> Optional[np.ndarray]:
+        if delta_seq is None or delta_seq.size == 0:
+            return None
+
+        delta_seq = np.asarray(delta_seq, dtype=np.float32)
+        obstacles = self.current_path_data.get("obstacles") if self.current_path_data else None
+        segments = self.current_path_data.get("segment_obstacles") if self.current_path_data else None
+        sim = copy.deepcopy(self.physics)
+        points: list[np.ndarray] = []
+        if protect_human is None:
+            protect_human = self._safety_protects_human()
+
+        for delta_idx, delta in enumerate(delta_seq):
+            collided, step_points = self._simulate_delta_on_engine(
+                sim,
+                delta,
+                obstacles=obstacles,
+                segment_obstacles=segments,
+                protect_robot=protect_robot,
+                protect_human=protect_human,
+            )
+            if step_points:
+                points.extend(step_points)
+            if self.debug_preview and delta_idx < self.debug_preview_limit:
+                end_pos = sim.robot.position.tolist()
+                print(
+                    "[debug preview] "
+                    f"idx={delta_idx} safe_delta={np.round(delta, 4).tolist()} "
+                    f"end_pos={[round(v, 4) for v in end_pos]} "
+                    f"heading={sim.robot.heading:.4f} collided={collided}"
+                )
+            if collided:
+                break
+
+        if not points:
+            return None
+        return np.stack(points, axis=0)
+
+    def _rollout_preview_action(
+        self,
+        pos: np.ndarray,
+        heading: float,
+        action: np.ndarray,
+        obstacles: Optional[np.ndarray],
+        segment_obstacles: Optional[np.ndarray],
+    ) -> tuple[list[np.ndarray], float, bool]:
+        pos = np.asarray(pos, dtype=np.float32).copy()
+        heading = float(heading)
+        action = np.asarray(action, dtype=np.float32)
+
         if self.action_mode == "forward_heading":
-            # Rollout using the same control mapping + physics integration as execution,
-            # so the visualized planned path matches what would actually happen.
-            sim = copy.deepcopy(self.physics)
-            sim.robot.position = robot_pos.astype(np.float32).copy()
-            points = []
-            obstacles = self.current_path_data.get("obstacles") if self.current_path_data else None
-            segments = (
-                self.current_path_data.get("segment_obstacles") if self.current_path_data else None
+            _delta, forward_input, turn_input, _speed_scale = self._action_to_execution(
+                action,
+                pos,
+                heading,
+            )
+        else:
+            delta = self._action_to_world_delta(action, pos, heading)
+            forward_input, turn_input, _speed_scale = self._delta_to_safe_control(
+                delta,
+                heading,
+                dt=self.data_dt,
             )
 
-            for act in action_seq:
-                forward_delta = float(act[0])
-                heading_delta = float(act[1])
+        step_points: list[np.ndarray] = []
+        collided = False
+        for _ in range(int(self.frame_stride)):
+            heading = wrap_angle(heading + float(turn_input) * float(self.physics.turn_speed) * float(self.sim_dt))
+            step_dist = float(forward_input) * float(self.physics.robot_speed) * float(self.sim_dt)
+            pos = pos + np.array([
+                np.cos(heading) * step_dist,
+                np.sin(heading) * step_dist,
+            ], dtype=np.float32)
+            step_points.append(pos.copy())
+            if self._preview_robot_collision(pos, obstacles, segment_obstacles):
+                collided = True
+                break
+        return step_points, heading, collided
 
-                turn_speed = float(sim.turn_speed)
-                robot_speed = float(sim.robot_speed)
-                turn_delta = heading_delta * float(self.turn_gain)
-                turn = turn_delta / (turn_speed * self.data_dt) if turn_speed > 0 else 0.0
-                forward = forward_delta / (robot_speed * self.data_dt) if robot_speed > 0 else 0.0
+    def _preview_robot_collision(
+        self,
+        robot_pos: np.ndarray,
+        obstacles: Optional[np.ndarray],
+        segment_obstacles: Optional[np.ndarray],
+    ) -> bool:
+        robot_pos = np.asarray(robot_pos, dtype=np.float32)
+        robot_radius = float(self.physics.robot_radius)
 
-                if self.curvature_slowdown and turn_speed > 0:
-                    max_turn = turn_speed * self.data_dt
-                    if max_turn > 1e-6:
-                        ratio = min(1.0, abs(turn_delta) / max_turn)
-                        speed_scale = max(
-                            float(self.min_speed_scale),
-                            1.0 - float(self.curvature_scale) * ratio,
-                        )
-                        forward *= speed_scale
+        if obstacles is not None and len(obstacles) > 0:
+            obs = np.asarray(obstacles, dtype=np.float32)
+            if obs.ndim == 2 and obs.shape[1] >= 3:
+                centers = obs[:, :2]
+                radii = obs[:, 2]
+                dists = np.linalg.norm(centers - robot_pos[None, :], axis=1)
+                if np.any(dists <= (radii + robot_radius)):
+                    return True
 
-                forward = float(np.clip(forward, -1.0, 1.0))
-                turn = float(np.clip(turn, -1.0, 1.0))
-                sim.set_control(forward, turn)
+        if segment_obstacles is not None and len(segment_obstacles) > 0:
+            segs = np.asarray(segment_obstacles, dtype=np.float32)
+            if segs.ndim == 2 and segs.shape[1] >= 4:
+                for seg in segs[:, :4]:
+                    dist_sq = self._point_segment_dist_sq(robot_pos, seg[:2], seg[2:4])
+                    if dist_sq <= robot_radius * robot_radius:
+                        return True
+        return False
 
-                # One policy action corresponds to one "data step" = frame_stride sim steps.
-                for _ in range(int(self.frame_stride)):
-                    robot_state, _human_state = sim.step()
-                    points.append(robot_state.position.copy())
-                    if obstacles is not None or segments is not None:
-                        collided, _info = sim.check_collision(
-                            obstacles, segment_obstacles=segments
-                        )
-                        if collided:
-                            return np.stack(points, axis=0) if points else None
+    def _action_to_world_delta(
+        self,
+        action: np.ndarray,
+        robot_pos: np.ndarray,
+        heading: float,
+    ) -> np.ndarray:
+        action = np.asarray(action, dtype=np.float32)
+        robot_pos = np.asarray(robot_pos, dtype=np.float32)
 
-            return np.stack(points, axis=0) if points else None
-        if self.robot_frame and self.action_mode in ("delta", "velocity"):
-            cos_h = float(np.cos(self.physics.robot.heading))
-            sin_h = float(np.sin(self.physics.robot.heading))
-            dx = cos_h * action_seq[:, 0] - sin_h * action_seq[:, 1]
-            dy = sin_h * action_seq[:, 0] + cos_h * action_seq[:, 1]
-            action_seq = np.stack([dx, dy], axis=-1).astype(np.float32)
-        if self.action_mode == "delta":
-            points = np.cumsum(
-                np.vstack([robot_pos[None, :], action_seq]), axis=0
-            )[1:]
-        elif self.action_mode == "position":
-            points = action_seq
-        else:  # velocity
-            points = robot_pos[None, :] + np.cumsum(action_seq * self.data_dt, axis=0)
-        return points
-
-    def _action_to_delta(self, action: np.ndarray, robot_pos: np.ndarray) -> np.ndarray:
         if self.action_mode == "forward_heading":
             forward = float(action[0])
-            cos_h = float(np.cos(self.physics.robot.heading))
-            sin_h = float(np.sin(self.physics.robot.heading))
-            dx = cos_h * forward
-            dy = sin_h * forward
-            return np.array([dx, dy], dtype=np.float32)
+            return np.array(
+                [np.cos(heading) * forward, np.sin(heading) * forward],
+                dtype=np.float32,
+            )
+
         if self.action_mode == "delta":
-            delta = action
+            delta = action[:2].astype(np.float32)
         elif self.action_mode == "position":
-            delta = action - robot_pos
+            delta = action[:2].astype(np.float32) - robot_pos[:2].astype(np.float32)
         else:
-            delta = action * self.data_dt
-        if self.robot_frame:
-            # model outputs delta in robot frame, convert to world frame for control
-            cos_h = float(np.cos(self.physics.robot.heading))
-            sin_h = float(np.sin(self.physics.robot.heading))
-            dx = cos_h * float(delta[0]) - sin_h * float(delta[1])
-            dy = sin_h * float(delta[0]) + cos_h * float(delta[1])
-            return np.array([dx, dy], dtype=np.float32)
-        return delta
+            delta = action[:2].astype(np.float32) * float(self.data_dt)
+
+        if self.robot_frame and self.action_mode in ("delta", "velocity"):
+            cos_h = float(np.cos(heading))
+            sin_h = float(np.sin(heading))
+            return np.array(
+                [
+                    cos_h * float(delta[0]) - sin_h * float(delta[1]),
+                    sin_h * float(delta[0]) + cos_h * float(delta[1]),
+                ],
+                dtype=np.float32,
+            )
+        return delta.astype(np.float32)
+
+    def _action_to_delta(self, action: np.ndarray, robot_pos: np.ndarray) -> np.ndarray:
+        return self._action_to_world_delta(action, robot_pos, self.physics.robot.heading)
+
+    def _world_delta_to_action(
+        self,
+        delta: np.ndarray,
+        robot_pos: np.ndarray,
+        heading: float,
+    ) -> np.ndarray:
+        delta = np.asarray(delta, dtype=np.float32).reshape(2)
+        robot_pos = np.asarray(robot_pos, dtype=np.float32).reshape(2)
+
+        if self.action_mode == "forward_heading":
+            dist = float(np.linalg.norm(delta))
+            if dist < 1e-6:
+                return np.zeros((2,), dtype=np.float32)
+            desired_heading = float(np.arctan2(delta[1], delta[0]))
+            max_heading_delta = float(self.physics.turn_speed * self.data_dt) / max(
+                float(self.turn_gain), 1e-6
+            )
+            heading_delta = wrap_angle(desired_heading - heading) / max(
+                float(self.turn_gain), 1e-6
+            )
+            heading_delta = float(np.clip(heading_delta, -max_heading_delta, max_heading_delta))
+            max_forward_delta = float(self.physics.robot_speed * self.data_dt)
+            forward_delta = float(np.clip(dist, 0.0, max_forward_delta))
+            return np.array([forward_delta, heading_delta], dtype=np.float32)
+
+        local = delta.astype(np.float32)
+        if self.robot_frame and self.action_mode in ("delta", "velocity"):
+            cos_h = float(np.cos(heading))
+            sin_h = float(np.sin(heading))
+            local = np.array(
+                [
+                    cos_h * float(delta[0]) + sin_h * float(delta[1]),
+                    -sin_h * float(delta[0]) + cos_h * float(delta[1]),
+                ],
+                dtype=np.float32,
+            )
+
+        if self.action_mode == "delta":
+            return local.astype(np.float32)
+        if self.action_mode == "velocity":
+            return (local / float(max(self.data_dt, 1e-6))).astype(np.float32)
+        return (robot_pos + delta).astype(np.float32)
+
+    def _action_to_execution(
+        self,
+        action: np.ndarray,
+        robot_pos: np.ndarray,
+        heading: float,
+    ) -> tuple[np.ndarray, float, float, float]:
+        if self.action_mode == "forward_heading":
+            forward_delta = float(action[0])
+            heading_delta = float(action[1])
+            turn_speed = float(self.physics.turn_speed)
+            robot_speed = float(self.physics.robot_speed)
+            turn_delta = heading_delta * float(self.turn_gain)
+            turn = turn_delta / (turn_speed * self.data_dt) if turn_speed > 0 else 0.0
+            forward = forward_delta / (robot_speed * self.data_dt) if robot_speed > 0 else 0.0
+            speed_scale = 1.0
+            if self.curvature_slowdown and turn_speed > 0:
+                max_turn = turn_speed * self.data_dt
+                if max_turn > 1e-6:
+                    ratio = min(1.0, abs(turn_delta) / max_turn)
+                    speed_scale = max(
+                        float(self.min_speed_scale),
+                        1.0 - float(self.curvature_scale) * ratio,
+                    )
+                    forward *= speed_scale
+            forward = float(np.clip(forward, -1.0, 1.0))
+            turn = float(np.clip(turn, -1.0, 1.0))
+            delta = self._action_to_world_delta(action, robot_pos, heading)
+            return delta, forward, turn, speed_scale
+
+        delta = self._action_to_world_delta(action, robot_pos, heading)
+        forward, turn = self._delta_to_control(delta, heading, dt=self.data_dt)
+        return delta, forward, turn, 1.0
+
+    def _simulate_action_on_engine(
+        self,
+        engine: PhysicsEngine,
+        action: np.ndarray,
+        obstacles: Optional[np.ndarray],
+        segment_obstacles: Optional[np.ndarray],
+        protect_robot: bool = True,
+        protect_human: bool = True,
+    ) -> tuple[bool, list[np.ndarray]]:
+        _, forward, turn, _speed_scale = self._action_to_execution(
+            action,
+            engine.robot.position,
+            engine.robot.heading,
+        )
+        engine.set_control(forward, turn)
+        points: list[np.ndarray] = []
+        for _ in range(int(self.frame_stride)):
+            robot_state, _human_state = engine.step()
+            points.append(robot_state.position.copy())
+            if obstacles is not None or segment_obstacles is not None:
+                collided, info = engine.check_collision(obstacles, segment_obstacles=segment_obstacles)
+                who = info.get("who") if info else None
+                relevant = (
+                    collided
+                    and (
+                        (protect_robot and who == "robot")
+                        or (protect_human and who == "human")
+                    )
+                )
+                if relevant:
+                    return True, points
+        return False, points
+
+    def _forward_heading_action_to_nominal_delta(
+        self,
+        engine: PhysicsEngine,
+        action: np.ndarray,
+    ) -> tuple[np.ndarray, PhysicsEngine]:
+        nominal_engine = copy.deepcopy(engine)
+        start_pos = nominal_engine.robot.position.copy()
+        self._simulate_action_on_engine(
+            nominal_engine,
+            action,
+            obstacles=None,
+            segment_obstacles=None,
+            protect_robot=False,
+            protect_human=False,
+        )
+        delta = (nominal_engine.robot.position - start_pos).astype(np.float32)
+        return delta, nominal_engine
+
+    def _action_seq_to_nominal_delta_seq(
+        self,
+        action_seq: np.ndarray,
+        engine: Optional[PhysicsEngine] = None,
+    ) -> np.ndarray:
+        action_seq = np.asarray(action_seq, dtype=np.float32)
+        if action_seq.size == 0:
+            return np.zeros((0, 2), dtype=np.float32)
+
+        sim = copy.deepcopy(engine if engine is not None else self.physics)
+        deltas: list[np.ndarray] = []
+        for action in action_seq:
+            if self.action_mode == "forward_heading":
+                delta, sim = self._forward_heading_action_to_nominal_delta(sim, action)
+            else:
+                delta = self._action_to_world_delta(action, sim.robot.position, sim.robot.heading)
+                self._simulate_delta_on_engine(
+                    sim,
+                    delta,
+                    obstacles=None,
+                    segment_obstacles=None,
+                    protect_robot=False,
+                    protect_human=False,
+                )
+            deltas.append(delta.astype(np.float32))
+        return np.asarray(deltas, dtype=np.float32)
+
+    def _safety_protects_human(self) -> bool:
+        return self.safety_mode == "human_robot_qp"
+
+    def _empty_safety_info(self) -> dict:
+        return {
+            "modified": False,
+            "shift": 0.0,
+            "constraint_count": 0,
+            "min_clearance": float("inf"),
+        }
+
+    def _update_episode_safety_stats(self, safety_info: dict):
+        self.episode_safety_stats["total_steps"] += 1
+        self.episode_safety_stats["total_shift"] += float(safety_info["shift"])
+        self.episode_safety_stats["constraint_count"] = max(
+            int(self.episode_safety_stats["constraint_count"]),
+            int(safety_info["constraint_count"]),
+        )
+        self.episode_safety_stats["min_clearance"] = min(
+            float(self.episode_safety_stats["min_clearance"]),
+            float(safety_info["min_clearance"]),
+        )
+        if safety_info["modified"]:
+            self.episode_safety_stats["modified_steps"] += 1
+
+    def _safety_filter_delta(
+        self,
+        engine: PhysicsEngine,
+        nominal_delta: np.ndarray,
+        obstacles: Optional[np.ndarray],
+        segment_obstacles: Optional[np.ndarray],
+        nominal_preview: Optional[PhysicsEngine] = None,
+    ) -> tuple[np.ndarray, PhysicsEngine, dict]:
+        nominal_delta = np.asarray(nominal_delta, dtype=np.float32).reshape(2)
+        info = self._empty_safety_info()
+        if self.safety_mode == "off":
+            trial_engine = copy.deepcopy(engine)
+            self._simulate_delta_on_engine(
+                trial_engine,
+                nominal_delta,
+                obstacles=None,
+                segment_obstacles=None,
+                protect_robot=False,
+                protect_human=False,
+            )
+            return nominal_delta.astype(np.float32), trial_engine, info
+
+        protect_human = self._safety_protects_human()
+        robot_pos = engine.robot.position.copy()
+        human_pos = engine.human.position.copy()
+        robot_heading = float(engine.robot.heading)
+        if nominal_preview is None:
+            nominal_preview = copy.deepcopy(engine)
+            self._simulate_delta_on_engine(
+                nominal_preview,
+                nominal_delta,
+                obstacles=obstacles,
+                segment_obstacles=segment_obstacles,
+                protect_robot=False,
+                protect_human=False,
+            )
+
+        extra_entities = [
+            ("robot_future", nominal_preview.robot.position.copy(), self.physics.robot_radius)
+        ]
+        if protect_human:
+            extra_entities.append(
+                ("human_future", nominal_preview.human.position.copy(), self.physics.human_radius)
+            )
+
+        qp = self.safety_filter.project_delta(
+            ref_delta=nominal_delta,
+            robot_pos=engine.robot.position,
+            robot_radius=self.physics.robot_radius,
+            human_pos=engine.human.position,
+            human_radius=self.physics.human_radius,
+            circle_obstacles=obstacles,
+            segment_obstacles=segment_obstacles,
+            include_human=protect_human,
+            extra_entities=extra_entities,
+        )
+        qp_delta = qp.delta.astype(np.float32)
+        chosen_delta = qp_delta.copy()
+        trial_engine = copy.deepcopy(engine)
+        collided, _ = self._simulate_delta_on_engine(
+            trial_engine,
+            chosen_delta,
+            obstacles=obstacles,
+            segment_obstacles=segment_obstacles,
+            protect_robot=True,
+            protect_human=protect_human,
+        )
+        collision_after_qp = bool(collided)
+        backoff_attempts: list[dict] = []
+        backoff_applied = False
+        backoff_scale = 1.0
+        resolution_stage = "qp"
+
+        if collided:
+            for scale in self.safety_backoff_scales[1:]:
+                backoff_delta = (chosen_delta * float(scale)).astype(np.float32)
+                backoff_engine = copy.deepcopy(engine)
+                collided, _ = self._simulate_delta_on_engine(
+                    backoff_engine,
+                    backoff_delta,
+                    obstacles=obstacles,
+                    segment_obstacles=segment_obstacles,
+                    protect_robot=True,
+                    protect_human=protect_human,
+                )
+                backoff_attempts.append(
+                    {
+                        "scale": float(scale),
+                        "delta": backoff_delta.astype(np.float32),
+                        "collided": bool(collided),
+                    }
+                )
+                if not collided:
+                    chosen_delta = backoff_delta
+                    trial_engine = backoff_engine
+                    backoff_applied = True
+                    backoff_scale = float(scale)
+                    resolution_stage = "backoff"
+                    break
+
+        info = {
+            "modified": bool(np.linalg.norm(chosen_delta - nominal_delta) > 1e-5 or qp.modified),
+            "shift": float(np.linalg.norm(chosen_delta - nominal_delta)),
+            "constraint_count": int(qp.constraint_count),
+            "min_clearance": float(qp.min_clearance),
+            "robot_pos": robot_pos.astype(np.float32),
+            "human_pos": human_pos.astype(np.float32),
+            "robot_heading": float(robot_heading),
+            "nominal_delta": nominal_delta.astype(np.float32),
+            "nominal_delta_norm": float(np.linalg.norm(nominal_delta)),
+            "nominal_preview_robot_pos": nominal_preview.robot.position.copy().astype(np.float32),
+            "nominal_preview_human_pos": nominal_preview.human.position.copy().astype(np.float32),
+            "protect_human": bool(protect_human),
+            "qp_delta": qp_delta.astype(np.float32),
+            "qp_delta_norm": float(np.linalg.norm(qp_delta)),
+            "qp_modified": bool(qp.modified),
+            "qp_constraint_count": int(qp.constraint_count),
+            "qp_total_constraint_count": int(getattr(qp, "total_constraint_count", qp.constraint_count)),
+            "qp_ref_feasible": bool(getattr(qp, "ref_feasible", True)),
+            "qp_candidate_count": int(getattr(qp, "candidate_count", 0)),
+            "qp_best_candidate_kind": str(getattr(qp, "best_candidate_kind", "unknown")),
+            "qp_best_candidate_constraints": list(
+                getattr(qp, "best_candidate_constraints", [])
+            ),
+            "qp_selected_constraints": list(getattr(qp, "selected_constraints", [])),
+            "collision_after_qp": bool(collision_after_qp),
+            "backoff_attempts": backoff_attempts,
+            "backoff_applied": bool(backoff_applied),
+            "backoff_scale": float(backoff_scale),
+            "stop_triggered": False,
+            "stop_clearance_threshold": float(self.safety_stop_clearance),
+            "stop_reason": None,
+            "resolution_stage": resolution_stage,
+        }
+        # if info["min_clearance"] < self.safety_stop_clearance:
+        #     chosen_delta = np.zeros((2,), dtype=np.float32)
+        #     trial_engine = copy.deepcopy(engine)
+        #     _collided, _ = self._simulate_delta_on_engine(
+        #         trial_engine,
+        #         chosen_delta,
+        #         obstacles=obstacles,
+        #         segment_obstacles=segment_obstacles,
+        #         protect_robot=True,
+        #         protect_human=protect_human,
+        #     )
+        #     info["modified"] = True
+        #     info["shift"] = float(np.linalg.norm(chosen_delta - nominal_delta))
+        #     info["stop_triggered"] = True
+        #     info["stop_reason"] = "min_clearance_below_stop_threshold"
+        #     info["resolution_stage"] = "stop"
+        info["final_delta"] = chosen_delta.astype(np.float32)
+        info["final_delta_norm"] = float(np.linalg.norm(chosen_delta))
+        return chosen_delta.astype(np.float32), trial_engine, info
+
+    def _safety_filter_action(
+        self,
+        engine: PhysicsEngine,
+        nominal_action: np.ndarray,
+        obstacles: Optional[np.ndarray],
+        segment_obstacles: Optional[np.ndarray],
+    ) -> tuple[np.ndarray, np.ndarray, PhysicsEngine, dict]:
+        nominal_action = np.asarray(nominal_action, dtype=np.float32)
+        info = self._empty_safety_info()
+        ref_delta = self._action_to_world_delta(
+            nominal_action, engine.robot.position, engine.robot.heading
+        )
+        if self.safety_mode == "off":
+            return nominal_action, ref_delta, copy.deepcopy(engine), info
+
+        nominal_preview = copy.deepcopy(engine)
+        self._simulate_action_on_engine(
+            nominal_preview,
+            nominal_action,
+            obstacles=obstacles,
+            segment_obstacles=segment_obstacles,
+            protect_robot=False,
+            protect_human=False,
+        )
+        chosen_delta, trial_engine, info = self._safety_filter_delta(
+            engine,
+            ref_delta,
+            obstacles=obstacles,
+            segment_obstacles=segment_obstacles,
+            nominal_preview=nominal_preview,
+        )
+        chosen_action = self._world_delta_to_action(
+            chosen_delta,
+            engine.robot.position,
+            engine.robot.heading,
+        )
+        return chosen_action.astype(np.float32), chosen_delta.astype(np.float32), trial_engine, info
+
+    def _apply_forward_heading_safety_filter(
+        self,
+        action_seq: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, list[dict]]:
+        action_seq = np.asarray(action_seq, dtype=np.float32)
+        stats = {
+            "applied": self.safety_mode != "off",
+            "modified_steps": 0,
+            "total_steps": int(len(action_seq)),
+            "mean_shift": 0.0,
+            "constraint_count": 0,
+            "min_clearance": float("inf"),
+        }
+        if action_seq.size == 0:
+            self.last_safety_stats = stats
+            return (
+                np.zeros((0, 2), dtype=np.float32),
+                np.zeros((0, 2), dtype=np.float32),
+                [],
+            )
+
+        obstacles = self.current_path_data.get("obstacles") if self.current_path_data else None
+        segments = self.current_path_data.get("segment_obstacles") if self.current_path_data else None
+        sim = copy.deepcopy(self.physics)
+        nominal_deltas: list[np.ndarray] = []
+        safe_deltas: list[np.ndarray] = []
+        safety_infos: list[dict] = []
+        shifts = []
+
+        for nominal_action in action_seq:
+            nominal_delta, nominal_preview = self._forward_heading_action_to_nominal_delta(
+                sim, nominal_action
+            )
+            if self.safety_mode == "off":
+                chosen_delta = nominal_delta
+                trial_engine = nominal_preview
+                info = self._empty_safety_info()
+            else:
+                chosen_delta, trial_engine, info = self._safety_filter_delta(
+                    sim,
+                    nominal_delta,
+                    obstacles=obstacles,
+                    segment_obstacles=segments,
+                    nominal_preview=nominal_preview,
+                )
+
+            nominal_deltas.append(nominal_delta.astype(np.float32))
+            safe_deltas.append(chosen_delta.astype(np.float32))
+            safety_infos.append(info)
+            stats["constraint_count"] = max(stats["constraint_count"], int(info["constraint_count"]))
+            stats["min_clearance"] = min(stats["min_clearance"], float(info["min_clearance"]))
+            shifts.append(float(info["shift"]))
+            if info["modified"]:
+                stats["modified_steps"] += 1
+            sim = trial_engine
+
+        if shifts:
+            stats["mean_shift"] = float(np.mean(shifts))
+        self.last_safety_stats = stats
+        return (
+            np.asarray(nominal_deltas, dtype=np.float32),
+            np.asarray(safe_deltas, dtype=np.float32),
+            safety_infos,
+        )
+
+    def _apply_safety_filter(self, action_seq: np.ndarray) -> np.ndarray:
+        action_seq = np.asarray(action_seq, dtype=np.float32)
+        stats = {
+            "applied": self.safety_mode != "off",
+            "modified_steps": 0,
+            "total_steps": int(len(action_seq)),
+            "mean_shift": 0.0,
+            "constraint_count": 0,
+            "min_clearance": float("inf"),
+        }
+        if (
+            self.safety_mode == "off"
+            or action_seq.size == 0
+            or self.current_path_data is None
+        ):
+            self.last_safety_stats = stats
+            return action_seq
+
+        obstacles = self.current_path_data.get("obstacles")
+        segments = self.current_path_data.get("segment_obstacles")
+        if (obstacles is None or len(obstacles) == 0) and (segments is None or len(segments) == 0):
+            self.last_safety_stats = stats
+            return action_seq
+
+        sim = copy.deepcopy(self.physics)
+        safe_actions = []
+        shifts = []
+
+        for nominal_action in action_seq:
+            chosen_action, chosen_delta, trial_engine, info = self._safety_filter_action(
+                sim,
+                nominal_action,
+                obstacles=obstacles,
+                segment_obstacles=segments,
+            )
+            stats["constraint_count"] = max(stats["constraint_count"], int(info["constraint_count"]))
+            stats["min_clearance"] = min(stats["min_clearance"], float(info["min_clearance"]))
+            safe_actions.append(chosen_action.astype(np.float32))
+            sim = trial_engine
+            shift = float(info["shift"])
+            shifts.append(shift)
+            if info["modified"]:
+                stats["modified_steps"] += 1
+
+        if shifts:
+            stats["mean_shift"] = float(np.mean(shifts))
+        self.last_safety_stats = stats
+        return np.asarray(safe_actions, dtype=np.float32)
 
     def _delta_to_control(
         self,
@@ -1081,6 +1964,67 @@ class ModelPlanner:
         forward_input = float(np.clip(forward_input, -1.0, 1.0))
         return forward_input, turn_input
 
+    def _delta_to_safe_control(
+        self,
+        delta: np.ndarray,
+        heading: float,
+        dt: Optional[float] = None,
+    ) -> tuple[float, float, float]:
+        if dt is None:
+            dt = self.data_dt
+        forward_input, turn_input = self._delta_to_control(delta, heading, dt=dt)
+        delta_norm = float(np.linalg.norm(delta))
+        if delta_norm < 1e-6:
+            return 0.0, 0.0, 1.0
+
+        desired_heading = float(np.arctan2(delta[1], delta[0]))
+        heading_error = wrap_angle(desired_heading - heading)
+        turn_speed = float(self.physics.turn_speed)
+        speed_scale = 1.0
+        if self.curvature_slowdown and turn_speed > 0:
+            max_turn = turn_speed * dt
+            if max_turn > 1e-6:
+                ratio = min(1.0, abs(heading_error) / max_turn)
+                speed_scale = max(
+                    float(self.min_speed_scale),
+                    1.0 - float(self.curvature_scale) * ratio,
+                )
+                forward_input *= speed_scale
+        return float(forward_input), float(turn_input), float(speed_scale)
+
+    def _simulate_delta_on_engine(
+        self,
+        engine: PhysicsEngine,
+        delta: np.ndarray,
+        obstacles: Optional[np.ndarray],
+        segment_obstacles: Optional[np.ndarray],
+        protect_robot: bool = True,
+        protect_human: bool = True,
+    ) -> tuple[bool, list[np.ndarray]]:
+        forward, turn, _speed_scale = self._delta_to_safe_control(
+            delta,
+            engine.robot.heading,
+            dt=self.data_dt,
+        )
+        engine.set_control(forward, turn)
+        points: list[np.ndarray] = []
+        for _ in range(int(self.frame_stride)):
+            robot_state, _human_state = engine.step()
+            points.append(robot_state.position.copy())
+            if obstacles is not None or segment_obstacles is not None:
+                collided, info = engine.check_collision(obstacles, segment_obstacles=segment_obstacles)
+                who = info.get("who") if info else None
+                relevant = (
+                    collided
+                    and (
+                        (protect_robot and who == "robot")
+                        or (protect_human and who == "human")
+                    )
+                )
+                if relevant:
+                    return True, points
+        return False, points
+
     def _step(self):
         """Advance simulation by one step."""
         self.collision_happened = False
@@ -1100,7 +2044,7 @@ class ModelPlanner:
             if self.use_policy and self.policy is not None:
                 # Update policy/action at data rate; hold control between data steps.
                 if is_data_step:
-                    if (self.cached_action_seq is None or 
+                    if (self.cached_action_seq is None or
                         self.cached_action_idx >= len(self.cached_action_seq) or
                         self.frames_since_inference >= self.inference_interval):
                         # Run inference
@@ -1108,63 +2052,248 @@ class ModelPlanner:
                         self.cached_action_seq = action_seq
                         self.cached_action_idx = 0
                         self.frames_since_inference = 0
-                        self.planned_path = self._actions_to_path(
-                            self.physics.robot.position, action_seq
-                        )
+
+                        preview_action_seq = None
+                        if self.action_mode == "forward_heading" and self.safety_mode != "off":
+                            (
+                                nominal_delta_seq,
+                                safe_delta_seq,
+                                safety_info_seq,
+                            ) = self._apply_forward_heading_safety_filter(action_seq)
+                            self.cached_nominal_delta_seq = nominal_delta_seq
+                            self.cached_safe_delta_seq = safe_delta_seq
+                            self.cached_safety_info_seq = safety_info_seq
+                            self.nominal_planned_path = self._deltas_to_path(
+                                nominal_delta_seq,
+                                protect_robot=False,
+                                protect_human=False,
+                            )
+                            self.safe_planned_path = self._deltas_to_path(safe_delta_seq)
+                            self.planned_path = self.safe_planned_path
+                        else:
+                            self.cached_nominal_delta_seq = None
+                            self.cached_safe_delta_seq = None
+                            self.cached_safety_info_seq = None
+                            preview_action_seq = self._apply_safety_filter(action_seq)
+                            self.nominal_planned_path = self._actions_to_path(
+                                self.physics.robot.position, preview_action_seq
+                            )
+                            self.safe_planned_path = None
+                            self.planned_path = self.nominal_planned_path
+
                         if self.cached_action_seq is not None and len(self.cached_action_seq) > 0:
                             norms = np.linalg.norm(self.cached_action_seq, axis=1)
-                            self._log_event(
-                                "inference",
-                                {
-                                    "action_len": int(len(self.cached_action_seq)),
-                                    "action_mean_norm": float(np.mean(norms)),
-                                    "action_max_norm": float(np.max(norms)),
-                                },
+                            raw_heading = action_seq[:, 1] if action_seq.shape[1] > 1 else np.zeros(
+                                (len(action_seq),), dtype=np.float32
                             )
+                            log_payload = {
+                                "action_len": int(len(self.cached_action_seq)),
+                                "action_mean_norm": float(np.mean(norms)),
+                                "action_max_norm": float(np.max(norms)),
+
+                                "raw_forward_mean": float(np.mean(action_seq[:, 0])),
+                                "raw_forward_std": float(np.std(action_seq[:, 0])),
+                                "raw_heading_mean": float(np.mean(raw_heading)),
+                                "raw_heading_std": float(np.std(raw_heading)),
+                                "raw_heading_maxabs": float(np.max(np.abs(raw_heading))),
+
+                                "raw_first3": np.round(action_seq[:3], 4).tolist(),
+                                "raw_action_first3": np.round(action_seq[:3], 4).tolist(),
+
+                                "safety_mode": self.safety_mode,
+                                "safety_modified_steps": int(
+                                    self.last_safety_stats.get("modified_steps", 0)
+                                ),
+                                "safety_mean_shift": float(
+                                    self.last_safety_stats.get("mean_shift", 0.0)
+                                ),
+                            }
+                            if self.cached_safe_delta_seq is not None:
+                                safe_delta_norms = np.linalg.norm(self.cached_safe_delta_seq, axis=1)
+                                log_payload.update(
+                                    {
+                                        "safe_mean_norm": float(np.mean(safe_delta_norms)),
+                                        "safe_max_norm": float(np.max(safe_delta_norms)),
+                                        "safe_delta_norm_mean": float(np.mean(safe_delta_norms)),
+                                        "safe_delta_norm_max": float(np.max(safe_delta_norms)),
+                                        "safe_delta_x_mean": float(np.mean(self.cached_safe_delta_seq[:, 0])),
+                                        "safe_delta_y_mean": float(np.mean(self.cached_safe_delta_seq[:, 1])),
+                                        "raw_action_seq": np.round(action_seq, 4).tolist(),
+                                        "safe_delta_seq": np.round(self.cached_safe_delta_seq, 4).tolist(),
+                                        "safe_first3": np.round(self.cached_safe_delta_seq[:3], 4).tolist(),
+                                        "safe_delta_first3": np.round(
+                                            self.cached_safe_delta_seq[:3], 4
+                                        ).tolist(),
+                                    }
+                                )
+                                if self.debug_qp_log and self.cached_safety_info_seq is not None:
+                                    qp_min_clearance_seq = [
+                                        float(info.get("min_clearance", float("inf")))
+                                        for info in self.cached_safety_info_seq
+                                    ]
+                                    qp_constraint_count_seq = [
+                                        int(info.get("constraint_count", 0))
+                                        for info in self.cached_safety_info_seq
+                                    ]
+                                    qp_stop_steps = [
+                                        int(idx)
+                                        for idx, info in enumerate(self.cached_safety_info_seq)
+                                        if bool(info.get("stop_triggered", False))
+                                    ]
+                                    qp_backoff_steps = [
+                                        int(idx)
+                                        for idx, info in enumerate(self.cached_safety_info_seq)
+                                        if bool(info.get("backoff_applied", False))
+                                    ]
+                                    log_payload.update(
+                                        {
+                                            "robot_qp_min_clearance_seq": [
+                                                round(v, 4) if np.isfinite(v) else "inf"
+                                                for v in qp_min_clearance_seq
+                                            ],
+                                            "robot_qp_constraint_count_seq": qp_constraint_count_seq,
+                                            "robot_qp_stop_steps": qp_stop_steps,
+                                            "robot_qp_backoff_steps": qp_backoff_steps,
+                                            "robot_qp_debug_seq": [
+                                                self._serialize_safety_info(info)
+                                                for info in self.cached_safety_info_seq
+                                            ],
+                                        }
+                                    )
+                            else:
+                                safe_norms = np.linalg.norm(preview_action_seq, axis=1)
+                                log_payload.update(
+                                    {
+                                        "safe_mean_norm": float(np.mean(safe_norms)),
+                                        "safe_max_norm": float(np.max(safe_norms)),
+                                        "safe_forward_mean": float(np.mean(preview_action_seq[:, 0])),
+                                        "safe_forward_std": float(np.std(preview_action_seq[:, 0])),
+                                        "safe_heading_mean": float(np.mean(preview_action_seq[:, 1])),
+                                        "safe_heading_std": float(np.std(preview_action_seq[:, 1])),
+                                        "safe_heading_maxabs": float(
+                                            np.max(np.abs(preview_action_seq[:, 1]))
+                                        ),
+                                        "safe_first3": np.round(preview_action_seq[:3], 4).tolist(),
+                                    }
+                                )
+
+                            self._log_event("inference", log_payload)
+                            if self.debug_policy:
+                                self.debug_inference_count += 1
+                                preview_count = min(self.debug_preview_limit, len(self.cached_action_seq))
+                                preview_actions = np.round(self.cached_action_seq[:preview_count], 4).tolist()
+                                if self.cached_safe_delta_seq is not None:
+                                    preview_safe_deltas = np.round(
+                                        self.cached_safe_delta_seq[:preview_count], 4
+                                    ).tolist()
+                                    safe_delta_norms = np.linalg.norm(self.cached_safe_delta_seq, axis=1)
+                                    print(
+                                        "[debug policy] "
+                                        f"inference={self.debug_inference_count} "
+                                        f"len={len(self.cached_action_seq)} "
+                                        f"raw_actions={preview_actions} "
+                                        f"safe_deltas={preview_safe_deltas} "
+                                        f"raw_heading_mean={float(np.mean(raw_heading)):.4f} "
+                                        f"raw_heading_maxabs={float(np.max(np.abs(raw_heading))):.4f} "
+                                        f"safe_delta_norm_mean={float(np.mean(safe_delta_norms)):.4f} "
+                                        f"safe_delta_norm_max={float(np.max(safe_delta_norms)):.4f}"
+                                    )
+                                else:
+                                    print(
+                                        "[debug policy] "
+                                        f"inference={self.debug_inference_count} "
+                                        f"len={len(self.cached_action_seq)} "
+                                        f"mean_norm={float(np.mean(norms)):.4f} "
+                                        f"max_norm={float(np.max(norms)):.4f} "
+                                        f"actions={preview_actions}"
+                                    )
                     else:
                         # Reuse cached actions
                         self.frames_since_inference += 1
 
                     # Get current action from cached sequence
+                    action_idx = 0
                     if self.cached_action_seq is not None and len(self.cached_action_seq) > 0:
-                        action = self.cached_action_seq[self.cached_action_idx]
-                        self.cached_action_idx += 1
-                        # Wrap around if needed
-                        if self.cached_action_idx >= len(self.cached_action_seq):
-                            self.cached_action_idx = len(self.cached_action_seq) - 1
+                        action_idx = min(self.cached_action_idx, len(self.cached_action_seq) - 1)
+                        action = self.cached_action_seq[action_idx]
+                        # Hold the last action once the cached sequence is exhausted.
+                        self.cached_action_idx = min(action_idx + 1, len(self.cached_action_seq) - 1)
                     else:
                         action = np.zeros(self.action_dim)
 
-                    self.current_action = action
-                    if self.action_mode == "forward_heading":
-                        forward_delta = float(action[0])
-                        heading_delta = float(action[1])
-                        turn_speed = float(self.physics.turn_speed)
-                        robot_speed = float(self.physics.robot_speed)
-                        turn_delta = heading_delta * self.turn_gain
-                        turn = turn_delta / (turn_speed * self.data_dt) if turn_speed > 0 else 0.0
-                        forward = forward_delta / (robot_speed * self.data_dt) if robot_speed > 0 else 0.0
-                        speed_scale = 1.0
-                        if self.curvature_slowdown and turn_speed > 0:
-                            max_turn = turn_speed * self.data_dt
-                            if max_turn > 1e-6:
-                                ratio = min(1.0, abs(turn_delta) / max_turn)
-                                speed_scale = max(
-                                    self.min_speed_scale, 1.0 - self.curvature_scale * ratio
-                                )
-                                forward *= speed_scale
-                        forward = float(np.clip(forward, -1.0, 1.0))
-                        turn = float(np.clip(turn, -1.0, 1.0))
-                        delta = self._action_to_delta(action, self.physics.robot.position)
-                        self.current_speed_scale = speed_scale
-                    else:
-                        delta = self._action_to_delta(action, self.physics.robot.position)
-                        forward, turn = self._delta_to_control(
-                            delta, self.physics.robot.heading, dt=self.data_dt
+                    safety_info = None
+                    if self.safety_mode != "off" and self.action_mode == "forward_heading":
+                        if self.cached_safe_delta_seq is not None and len(self.cached_safe_delta_seq) > 0:
+                            delta_idx = min(action_idx, len(self.cached_safe_delta_seq) - 1)
+                            delta = self.cached_safe_delta_seq[delta_idx].astype(np.float32)
+                            if (
+                                self.cached_safety_info_seq is not None
+                                and delta_idx < len(self.cached_safety_info_seq)
+                            ):
+                                safety_info = self.cached_safety_info_seq[delta_idx]
+                            else:
+                                safety_info = self._empty_safety_info()
+                        else:
+                            obstacles = self.current_path_data.get("obstacles") if self.current_path_data else None
+                            segments = (
+                                self.current_path_data.get("segment_obstacles")
+                                if self.current_path_data
+                                else None
+                            )
+                            nominal_delta, nominal_preview = self._forward_heading_action_to_nominal_delta(
+                                self.physics, action
+                            )
+                            delta, _trial_engine, safety_info = self._safety_filter_delta(
+                                self.physics,
+                                nominal_delta,
+                                obstacles=obstacles,
+                                segment_obstacles=segments,
+                                nominal_preview=nominal_preview,
+                            )
+                        self._update_episode_safety_stats(safety_info)
+                        forward, turn, speed_scale = self._delta_to_safe_control(
+                            delta,
+                            self.physics.robot.heading,
                         )
-                        self.current_speed_scale = 1.0
+                    elif self.safety_mode != "off":
+                        obstacles = self.current_path_data.get("obstacles") if self.current_path_data else None
+                        segments = (
+                            self.current_path_data.get("segment_obstacles")
+                            if self.current_path_data
+                            else None
+                        )
+                        safe_action, delta, _trial_engine, safety_info = self._safety_filter_action(
+                            self.physics,
+                            action,
+                            obstacles=obstacles,
+                            segment_obstacles=segments,
+                        )
+                        action = safe_action
+                        self._update_episode_safety_stats(safety_info)
+                        forward, turn, speed_scale = self._delta_to_safe_control(
+                            delta,
+                            self.physics.robot.heading,
+                        )
+                    else:
+                        delta, forward, turn, speed_scale = self._action_to_execution(
+                            action,
+                            self.physics.robot.position,
+                            self.physics.robot.heading,
+                        )
+                    self.current_action = action
+                    self.current_speed_scale = speed_scale
                     self.current_delta = delta
                     self.cached_control = (forward, turn)
+                    if is_data_step and self.safety_mode == "robot_qp" and self.action_mode == "forward_heading":
+                        self._log_robot_qp_step(
+                            action_idx=action_idx,
+                            action=action,
+                            delta=delta,
+                            forward=forward,
+                            turn=turn,
+                            speed_scale=speed_scale,
+                            safety_info=safety_info,
+                        )
                 else:
                     forward, turn = self.cached_control
                     action = self.current_action
@@ -1172,8 +2301,13 @@ class ModelPlanner:
             else:
                 forward, turn = self._get_manual_control()
                 self.planned_path = None
+                self.nominal_planned_path = None
+                self.safe_planned_path = None
                 # Reset cache when switching to manual
                 self.cached_action_seq = None
+                self.cached_nominal_delta_seq = None
+                self.cached_safe_delta_seq = None
+                self.cached_safety_info_seq = None
                 self.cached_action_idx = 0
                 self.frames_since_inference = 0
                 self.cached_control = (forward, turn)
@@ -1230,7 +2364,7 @@ class ModelPlanner:
             )
             self.obs_history.append(obs)
             self.prev_robot_pos = robot_state.position.copy()
-        self._log_step(self.frame_count, robot_state, human_state, action, delta, forward, turn)
+        # self._log_step(self.frame_count, robot_state, human_state, action, delta, forward, turn)
         if is_data_step:
             self.data_step_idx += 1
         self.frame_count += 1
@@ -1272,6 +2406,8 @@ class ModelPlanner:
     def _render(self, robot_state, human_state, actual_fps: float):
         scores = self.scorer.get_scores() if self.scorer else {}
         mode = "policy" if self.use_policy else "manual"
+        safety_label = "diffusion" if self.safety_mode == "off" else self.safety_mode
+        mode += f" [{safety_label}]"
         if self.paused:
             mode += " (paused)"
         elif self.collision_pause:
@@ -1286,6 +2422,7 @@ class ModelPlanner:
             "recording": False,
             "scores": scores,
             "mode": mode,
+            "safety_mode": self.safety_mode,
             "robot_radius": self.physics.robot_radius,
             "human_radius": self.physics.human_radius,
             "controls": [
@@ -1313,6 +2450,8 @@ class ModelPlanner:
             robot_trajectory=self.robot_trajectory,
             human_trajectory=self.human_trajectory,
             planned_path=self.planned_path,
+            nominal_planned_path=self.nominal_planned_path,
+            safe_planned_path=self.safe_planned_path,
             lookahead_points=self.lookahead_world,
             obstacles=self.current_path_data.get("obstacles") if self.current_path_data else None,
             segment_obstacles=self.current_path_data.get("segment_obstacles") if self.current_path_data else None,
@@ -1349,7 +2488,26 @@ class ModelPlanner:
 
         self.visualizer.quit()
         if self.log_fp is not None:
-            self._log_event("shutdown")
+            total_steps = max(1, int(self.episode_safety_stats["total_steps"]))
+            self._log_event(
+                "shutdown",
+                {
+                    "episode_safety_stats": {
+                        "modified_steps": int(self.episode_safety_stats["modified_steps"]),
+                        "total_steps": int(self.episode_safety_stats["total_steps"]),
+                        "mean_shift": round(
+                            float(self.episode_safety_stats["total_shift"]) / float(total_steps),
+                            4,
+                        ),
+                        "constraint_count": int(self.episode_safety_stats["constraint_count"]),
+                        "min_clearance": round(
+                            float(self.episode_safety_stats["min_clearance"]), 4
+                        )
+                        if np.isfinite(float(self.episode_safety_stats["min_clearance"]))
+                        else "inf",
+                    }
+                },
+            )
             self.log_fp.close()
         print("Program exit")
 
@@ -1430,6 +2588,56 @@ def main():
         default=1,
         help="Log every N frames (default: 1).",
     )
+    parser.add_argument(
+        "--safety-mode",
+        default="human_robot_qp",
+        help="off | robot_qp | human_robot_qp. Apply online safety filtering before execution.",
+    )
+    parser.add_argument(
+        "--safety-margin",
+        type=float,
+        default=0.2,
+        help="Extra safety margin in meters added around obstacles for QP filtering.",
+    )
+    parser.add_argument(
+        "--safety-alpha",
+        type=float,
+        default=1.0,
+        help="Barrier gain for QP halfspace constraints.",
+    )
+    parser.add_argument(
+        "--safety-max-constraints",
+        type=int,
+        default=8,
+        help="Maximum nearby obstacle constraints kept in each 2D QP projection.",
+    )
+    parser.add_argument(
+        "--safety-influence-distance",
+        type=float,
+        default=2.0,
+        help="Only obstacles within this clearance band are included in the QP.",
+    )
+    parser.add_argument(
+        "--debug-preview",
+        action="store_true",
+        help="Print preview-rollout diagnostics from _actions_to_path.",
+    )
+    parser.add_argument(
+        "--debug-policy",
+        action="store_true",
+        help="Print predicted action summaries after each inference.",
+    )
+    parser.add_argument(
+        "--no-debug-qp-log",
+        action="store_true",
+        help="Disable detailed robot_qp diagnostics in the jsonl log.",
+    )
+    parser.add_argument(
+        "--debug-preview-limit",
+        type=int,
+        default=5,
+        help="Maximum number of actions printed for each debug preview/policy dump.",
+    )
     parser.add_argument("--no-log", action="store_true", help="Disable planning logs")
     args = parser.parse_args()
 
@@ -1463,6 +2671,15 @@ def main():
         min_speed_scale=args.min_speed_scale,
         log_path=None if args.no_log else args.log_dir / f"planning_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl",
         log_interval=args.log_interval,
+        safety_mode=args.safety_mode,
+        safety_margin=args.safety_margin,
+        safety_alpha=args.safety_alpha,
+        safety_max_constraints=args.safety_max_constraints,
+        safety_influence_distance=args.safety_influence_distance,
+        debug_preview=args.debug_preview,
+        debug_preview_limit=args.debug_preview_limit,
+        debug_policy=args.debug_policy,
+        debug_qp_log=not args.no_debug_qp_log,
     )
     planner.run()
 
