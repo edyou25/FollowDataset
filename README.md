@@ -32,3 +32,6 @@ python collect.py
 - **Zarr**: 存储轨迹数据 (robot_path, human_path, timestamps)
 - **JSON**: 存储元数据 (起点、终点、路径长度等)
 
+## 开发文档
+
+- [最近一次安全过滤提交说明](docs/commit_82ed297_qp_safety_filter_zh.md)
