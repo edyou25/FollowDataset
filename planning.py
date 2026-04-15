@@ -124,7 +124,7 @@ class ModelPlanner:
         frame_stride: Optional[int] = None,
         path_length: float = 50.0,
         corridor_width: float = 2.5,
-        obstacle_radius: float = 0.3,
+        obstacle_radius: float = 0.5,
         leash_length: float = 1.5,
         robot_speed: float = 1.0,
         robot_radius: float = 0.3,
@@ -871,6 +871,8 @@ class ModelPlanner:
                 elif event.key == pygame.K_r:
                     self._reset_position()
                     print("Position reset")
+                elif event.key == pygame.K_m:
+                    self._cycle_safety_mode()
                 elif event.key == pygame.K_n:
                     self._generate_new_path()
                 elif event.key == pygame.K_p:
@@ -2024,6 +2026,45 @@ class ModelPlanner:
                 if relevant:
                     return True, points
         return False, points
+    
+    def _cycle_safety_mode(self):
+        """Cycle safety mode: off -> robot_qp -> human_robot_qp -> off."""
+        modes = ["off", "robot_qp", "human_robot_qp"]
+        current = normalize_safety_mode(self.safety_mode)
+        next_idx = (modes.index(current) + 1) % len(modes)
+        new_mode = modes[next_idx]
+
+        # Keep compatibility with action mode constraints
+        if new_mode != "off" and self.action_mode not in ("forward_heading", "delta", "velocity"):
+            print(
+                f"[warn] safety_mode={new_mode} is only supported for "
+                f"forward_heading/delta/velocity; fallback to off"
+            )
+            new_mode = "off"
+
+        self.safety_mode = new_mode
+
+        # Clear caches so the new mode takes effect immediately
+        self.cached_action_seq = None
+        self.cached_nominal_delta_seq = None
+        self.cached_safe_delta_seq = None
+        self.cached_safety_info_seq = None
+        self.cached_action_idx = 0
+        self.frames_since_inference = 0
+        self.cached_control = (0.0, 0.0)
+        self.current_action = None
+        self.current_delta = None
+        self.current_speed_scale = 1.0
+
+        # Clear preview paths
+        self.planned_path = None
+        self.nominal_planned_path = None
+        self.safe_planned_path = None
+
+        if self.log_fp is not None:
+            self._log_event("safety_mode_changed", {"safety_mode": self.safety_mode})
+
+        print(f"Safety mode: {self.safety_mode}")
 
     def _step(self):
         """Advance simulation by one step."""
@@ -2590,7 +2631,7 @@ def main():
     )
     parser.add_argument(
         "--safety-mode",
-        default="human_robot_qp",
+        default="robot_qp",
         help="off | robot_qp | human_robot_qp. Apply online safety filtering before execution.",
     )
     parser.add_argument(
