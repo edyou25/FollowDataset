@@ -432,9 +432,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Launch Gazebo with GUI in mid360 mode. Default is headless.",
     )
+    parser.set_defaults(mid360_visualize=False)
+    parser.add_argument(
+        "--mid360-visualize",
+        dest="mid360_visualize",
+        action="store_true",
+        help="Enable laser ray visualization in Gazebo.",
+    )
     parser.add_argument(
         "--no-mid360-visualize",
-        action="store_true",
+        dest="mid360_visualize",
+        action="store_false",
         help="Disable laser ray visualization in Gazebo.",
     )
     return parser
@@ -457,7 +465,7 @@ def create_collector_from_args(args: argparse.Namespace):
         plugin_library_path=plugin_library,
         downsample=max(1, int(args.mid360_downsample)),
         gui=bool(args.gazebo_gui),
-        visualize_laser=not bool(args.no_mid360_visualize),
+        visualize_laser=bool(args.mid360_visualize),
     )
 
     fps = args.fps if args.fps is not None else int(round(config.update_rate))

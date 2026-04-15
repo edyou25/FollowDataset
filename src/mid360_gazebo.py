@@ -163,6 +163,7 @@ class Mid360GazeboSession:
         self.world_path = self.runtime_dir / "world.sdf"
         self.robot_model_path = self.runtime_dir / "robot.urdf"
         self.human_model_path = self.runtime_dir / "human.sdf"
+        self.leash_model_path = self.runtime_dir / "leash.sdf"
         self.roscore_log_path = self.runtime_dir / "roscore.log"
         self.gazebo_log_path = self.runtime_dir / "gazebo.log"
         self.rviz_log_path = self.runtime_dir / "rviz.log"
@@ -197,6 +198,7 @@ class Mid360GazeboSession:
 
         self.robot_model_name = "followdataset_mid360_robot"
         self.human_model_name = "followdataset_human"
+        self.leash_model_name = "followdataset_leash"
 
     def start(self):
         if self.started:
@@ -212,6 +214,7 @@ class Mid360GazeboSession:
             self._bind_gazebo_services()
             self._spawn_robot()
             self._spawn_human()
+            self._spawn_leash()
             self.started = True
             self.wait_for_first_pointcloud(timeout_sec=self.config.wait_for_first_cloud_sec)
             self._start_camera_follow()
@@ -222,7 +225,7 @@ class Mid360GazeboSession:
 
     def close(self):
         if self.rospy is not None and self.delete_model_srv is not None:
-            for name in (self.robot_model_name, self.human_model_name):
+            for name in (self.robot_model_name, self.human_model_name, self.leash_model_name):
                 try:
                     self.delete_model_srv(name)
                 except Exception:
@@ -309,6 +312,7 @@ class Mid360GazeboSession:
             "world_sdf": str(self.world_path),
             "robot_urdf": str(self.robot_model_path),
             "human_sdf": str(self.human_model_path),
+            "leash_sdf": str(self.leash_model_path),
             "rviz_config": str(_repo_root() / "rviz" / "mid360.rviz"),
             "wall_height": float(self.config.wall_height),
         }
@@ -330,6 +334,7 @@ class Mid360GazeboSession:
             z=0.5 * float(self.config.human_height),
             yaw=0.0,
         )
+        self._update_leash_model(robot_state, human_state)
         self._camera_target_xy[:] = [float(robot_state.position[0]), float(robot_state.position[1])]
 
     def get_robot_base_pose(self, robot_state: Any) -> np.ndarray:
@@ -408,6 +413,7 @@ class Mid360GazeboSession:
         self.world_path.write_text(self._generate_world_sdf(), encoding="utf-8")
         self.robot_model_path.write_text(self._generate_robot_urdf(), encoding="utf-8")
         self.human_model_path.write_text(self._generate_human_sdf(), encoding="utf-8")
+        self.leash_model_path.write_text(self._generate_leash_sdf(), encoding="utf-8")
 
     def _import_ros_modules(self):
         required_commands = ["roscore", "roslaunch"]
@@ -642,12 +648,59 @@ class Mid360GazeboSession:
             "world",
         )
 
-    def _set_model_state(self, model_name: str, *, x: float, y: float, z: float, yaw: float):
+    def _spawn_leash(self):
+        xml = self.leash_model_path.read_text(encoding="utf-8")
+        self.spawn_model_srv(
+            self.leash_model_name,
+            xml,
+            "",
+            self._pose_msg(0.0, 0.0, 0.8, 0.0, 0.0, 0.0),
+            "world",
+        )
+
+    def _set_model_state(
+        self,
+        model_name: str,
+        *,
+        x: float,
+        y: float,
+        z: float,
+        yaw: float,
+        roll: float = 0.0,
+        pitch: float = 0.0,
+    ):
         state = self.gazebo_msgs.ModelState()
         state.model_name = model_name
-        state.pose = self._pose_msg(x, y, z, 0.0, 0.0, yaw)
+        state.pose = self._pose_msg(x, y, z, roll, pitch, yaw)
         state.reference_frame = "world"
         self.set_model_state_srv(state)
+
+    def _update_leash_model(self, robot_state: Any, human_state: Any):
+        robot_pos = np.asarray(robot_state.position, dtype=np.float64)
+        human_pos = np.asarray(human_state.position, dtype=np.float64)
+        delta_xy = human_pos - robot_pos
+        length_xy = float(np.linalg.norm(delta_xy))
+        if length_xy < 1e-6:
+            return
+
+        z0 = float(self.config.robot_base_z)
+        z1 = 0.5 * float(self.config.human_height)
+        dx = float(delta_xy[0])
+        dy = float(delta_xy[1])
+        dz = float(z1 - z0)
+        yaw = float(np.arctan2(dy, dx))
+        pitch = float(np.pi / 2.0 - np.arctan2(dz, max(length_xy, 1e-6)))
+        center = 0.5 * (robot_pos + human_pos)
+        z = 0.5 * (z0 + z1)
+
+        self._set_model_state(
+            self.leash_model_name,
+            x=float(center[0]),
+            y=float(center[1]),
+            z=z,
+            yaw=yaw,
+            pitch=pitch,
+        )
 
     def _pose_msg(self, x: float, y: float, z: float, roll: float, pitch: float, yaw: float):
         pose = self.geometry_msgs.Pose()
@@ -1110,6 +1163,40 @@ class Mid360GazeboSession:
         <material>
           <ambient>0.66 0.79 0.95 1</ambient>
           <diffuse>0.66 0.79 0.95 1</diffuse>
+        </material>
+      </visual>
+    </link>
+  </model>
+</sdf>
+"""
+
+    def _generate_leash_sdf(self) -> str:
+        return """<?xml version='1.0'?>
+<sdf version='1.6'>
+  <model name='followdataset_leash'>
+    <static>false</static>
+    <link name='leash_link'>
+      <gravity>false</gravity>
+      <self_collide>false</self_collide>
+      <kinematic>true</kinematic>
+      <inertial>
+        <mass>0.01</mass>
+        <inertia>
+          <ixx>1e-6</ixx>
+          <iyy>1e-6</iyy>
+          <izz>1e-6</izz>
+        </inertia>
+      </inertial>
+      <visual name='leash_visual'>
+        <geometry>
+          <cylinder>
+            <radius>0.025</radius>
+            <length>1.0</length>
+          </cylinder>
+        </geometry>
+        <material>
+          <ambient>0.98 0.90 0.28 1</ambient>
+          <diffuse>0.98 0.90 0.28 1</diffuse>
         </material>
       </visual>
     </link>
