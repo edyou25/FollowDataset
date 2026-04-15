@@ -124,7 +124,7 @@ class ModelPlanner:
         frame_stride: Optional[int] = None,
         path_length: float = 50.0,
         corridor_width: float = 2.5,
-        obstacle_radius: float = 0.5,
+        obstacle_radius: float = 0.3,
         leash_length: float = 1.5,
         robot_speed: float = 1.0,
         robot_radius: float = 0.3,

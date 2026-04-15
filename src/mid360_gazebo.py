@@ -6,6 +6,7 @@ from __future__ import annotations
 import importlib
 import math
 import os
+import signal
 import shutil
 import socket
 import subprocess
@@ -116,7 +117,7 @@ class Mid360GazeboConfig:
     update_rate: float = 10.0
     range_min: float = 0.1
     range_max: float = 40.0
-    visualize_laser: bool = True
+    visualize_laser: bool = False
     gui: bool = True
     verbose: bool = True
     wall_height: float = 2.2
@@ -164,9 +165,12 @@ class Mid360GazeboSession:
         self.human_model_path = self.runtime_dir / "human.sdf"
         self.roscore_log_path = self.runtime_dir / "roscore.log"
         self.gazebo_log_path = self.runtime_dir / "gazebo.log"
+        self.rviz_log_path = self.runtime_dir / "rviz.log"
 
         self.roscore_process: Optional[subprocess.Popen] = None
         self.gazebo_process: Optional[subprocess.Popen] = None
+        self.rviz_process: Optional[subprocess.Popen] = None
+        self.static_tf_process: Optional[subprocess.Popen] = None
         self.started_roscore = False
         self.started = False
 
@@ -176,15 +180,20 @@ class Mid360GazeboSession:
         self.geometry_msgs = None
         self.gazebo_msgs = None
         self.gazebo_srvs = None
+        self.tf2_ros = None
 
         self.spawn_model_srv = None
         self.spawn_urdf_model_srv = None
         self.delete_model_srv = None
         self.set_model_state_srv = None
+        self.static_tf_broadcaster = None
 
         self._cloud_lock = threading.Lock()
         self._latest_cloud: Optional[dict[str, Any]] = None
         self._cloud_seq = 0
+        self._camera_target_xy = np.zeros(2, dtype=np.float64)
+        self._camera_thread: Optional[threading.Thread] = None
+        self._camera_stop_event = threading.Event()
 
         self.robot_model_name = "followdataset_mid360_robot"
         self.human_model_name = "followdataset_human"
@@ -193,16 +202,20 @@ class Mid360GazeboSession:
         if self.started:
             return
         try:
+            self._cleanup_stale_processes()
             self._write_runtime_files()
             self._import_ros_modules()
             self._ensure_roscore()
             self._ensure_ros_node()
+            self._launch_static_tf()
             self._launch_gazebo()
             self._bind_gazebo_services()
             self._spawn_robot()
             self._spawn_human()
             self.started = True
             self.wait_for_first_pointcloud(timeout_sec=self.config.wait_for_first_cloud_sec)
+            self._start_camera_follow()
+            self._launch_rviz()
         except Exception:
             self.close()
             raise
@@ -215,7 +228,16 @@ class Mid360GazeboSession:
                 except Exception:
                     pass
 
-        for proc in (self.gazebo_process, self.roscore_process if self.started_roscore else None):
+        self._camera_stop_event.set()
+        if self._camera_thread is not None and self._camera_thread.is_alive():
+            self._camera_thread.join(timeout=2.0)
+
+        for proc in (
+            self.rviz_process,
+            self.static_tf_process,
+            self.gazebo_process,
+            self.roscore_process if self.started_roscore else None,
+        ):
             if proc is None:
                 continue
             if proc.poll() is None:
@@ -224,10 +246,51 @@ class Mid360GazeboSession:
                     proc.wait(timeout=10.0)
                 except subprocess.TimeoutExpired:
                     proc.kill()
+                    try:
+                        proc.wait(timeout=2.0)
+                    except subprocess.TimeoutExpired:
+                        pass
 
+        self._cleanup_stale_rviz_processes()
+
+        self.rviz_process = None
+        self.static_tf_process = None
         self.gazebo_process = None
         self.roscore_process = None
+        self._camera_thread = None
         self.started = False
+
+    def _cleanup_stale_rviz_processes(self):
+        rviz_config = _repo_root() / "rviz" / "mid360.rviz"
+        patterns = [
+            f"rviz -d {rviz_config}",
+            "rviz",
+        ]
+        current_pid = os.getpid()
+        for pattern in patterns:
+            try:
+                result = subprocess.run(
+                    ["pgrep", "-f", pattern],
+                    check=False,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                )
+            except FileNotFoundError:
+                return
+            if result.returncode not in (0, 1):
+                continue
+            for line in result.stdout.splitlines():
+                try:
+                    pid = int(line.strip())
+                except ValueError:
+                    continue
+                if pid == current_pid:
+                    continue
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    continue
 
         if not self.config.keep_runtime_artifacts:
             shutil.rmtree(self.runtime_dir, ignore_errors=True)
@@ -244,8 +307,9 @@ class Mid360GazeboSession:
             "plugin_library": str(self.config.plugin_library_path) if self.config.plugin_library_path else None,
             "runtime_dir": str(self.runtime_dir),
             "world_sdf": str(self.world_path),
-            "robot_sdf": str(self.robot_model_path),
+            "robot_urdf": str(self.robot_model_path),
             "human_sdf": str(self.human_model_path),
+            "rviz_config": str(_repo_root() / "rviz" / "mid360.rviz"),
             "wall_height": float(self.config.wall_height),
         }
 
@@ -266,6 +330,7 @@ class Mid360GazeboSession:
             z=0.5 * float(self.config.human_height),
             yaw=0.0,
         )
+        self._camera_target_xy[:] = [float(robot_state.position[0]), float(robot_state.position[1])]
 
     def get_robot_base_pose(self, robot_state: Any) -> np.ndarray:
         return self._pose_vector_from_xyz_rpy(
@@ -361,6 +426,7 @@ class Mid360GazeboSession:
             self.geometry_msgs = importlib.import_module("geometry_msgs.msg")
             self.gazebo_msgs = importlib.import_module("gazebo_msgs.msg")
             self.gazebo_srvs = importlib.import_module("gazebo_msgs.srv")
+            self.tf2_ros = importlib.import_module("tf2_ros")
         except ModuleNotFoundError as exc:
             missing_modules.append(str(exc))
 
@@ -392,6 +458,40 @@ class Mid360GazeboSession:
                 raise RuntimeError(f"roscore exited unexpectedly. See {self.roscore_log_path}")
             time.sleep(0.2)
         raise RuntimeError("Timed out waiting for roscore on port 11311.")
+
+    def _cleanup_stale_processes(self):
+        # Previous interrupted runs can leave Gazebo processes around, which
+        # keeps the default Gazebo master port occupied and breaks startup.
+        stale_patterns = [
+            "gzserver",
+            "gzclient",
+        ]
+        current_pid = os.getpid()
+        for pattern in stale_patterns:
+            try:
+                result = subprocess.run(
+                    ["pgrep", "-f", pattern],
+                    check=False,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                )
+            except FileNotFoundError:
+                break
+            if result.returncode not in (0, 1):
+                continue
+            for line in result.stdout.splitlines():
+                try:
+                    pid = int(line.strip())
+                except ValueError:
+                    continue
+                if pid == current_pid:
+                    continue
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+        time.sleep(1.0)
 
     def _ensure_ros_node(self):
         if not self.rospy.core.is_initialized():
@@ -430,6 +530,78 @@ class Mid360GazeboSession:
                 stderr=subprocess.STDOUT,
                 env=env,
             )
+
+    def _launch_static_tf(self):
+        if self.tf2_ros is None or self.geometry_msgs is None or self.rospy is None:
+            return
+        xyz = MID360_MOUNT_XYZ
+        rpy = MID360_MOUNT_RPY
+        transform = self.geometry_msgs.TransformStamped()
+        transform.header.stamp = self.rospy.Time.now()
+        transform.header.frame_id = "base_link"
+        transform.child_frame_id = self.config.frame_name
+        transform.transform.translation.x = float(xyz[0])
+        transform.transform.translation.y = float(xyz[1])
+        transform.transform.translation.z = float(xyz[2])
+        quat = Rotation.from_euler(
+            "xyz",
+            [float(rpy[0]), float(rpy[1]), float(rpy[2])],
+            degrees=False,
+        ).as_quat()
+        transform.transform.rotation.x = float(quat[0])
+        transform.transform.rotation.y = float(quat[1])
+        transform.transform.rotation.z = float(quat[2])
+        transform.transform.rotation.w = float(quat[3])
+        self.static_tf_broadcaster = self.tf2_ros.StaticTransformBroadcaster()
+        self.static_tf_broadcaster.sendTransform(transform)
+
+    def _launch_rviz(self):
+        rviz_config = _repo_root() / "rviz" / "mid360.rviz"
+        if shutil.which("rviz") is None or not rviz_config.exists():
+            return
+        if not os.environ.get("DISPLAY"):
+            return
+        with open(self.rviz_log_path, "w", encoding="utf-8") as log_file:
+            self.rviz_process = subprocess.Popen(
+                ["rviz", "-d", str(rviz_config)],
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                env=os.environ.copy(),
+            )
+
+    def _start_camera_follow(self):
+        if not self.config.gui or shutil.which("gz") is None:
+            return
+        if self._camera_thread is not None and self._camera_thread.is_alive():
+            return
+        self._camera_stop_event.clear()
+        self._camera_thread = threading.Thread(target=self._camera_follow_loop, daemon=True)
+        self._camera_thread.start()
+
+    def _camera_follow_loop(self):
+        quat = Rotation.from_euler("xyz", [0.0, math.pi / 2.0, 0.0], degrees=False).as_quat()
+        while not self._camera_stop_event.is_set():
+            x = float(self._camera_target_xy[0])
+            y = float(self._camera_target_xy[1])
+            msg = (
+                f"position {{ x: {x:.4f} y: {y:.4f} z: 8.0 }} "
+                f"orientation {{ x: {float(quat[0]):.8f} y: {float(quat[1]):.8f} "
+                f"z: {float(quat[2]):.8f} w: {float(quat[3]):.8f} }}"
+            )
+            subprocess.run(
+                [
+                    "gz",
+                    "topic",
+                    "-p",
+                    "/gazebo/followdataset_mid360_world/user_camera/pose",
+                    "-m",
+                    msg,
+                ],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            self._camera_stop_event.wait(0.25)
 
     def _bind_gazebo_services(self):
         self.rospy.wait_for_service("/gazebo/spawn_sdf_model", timeout=30.0)
@@ -628,16 +800,16 @@ class Mid360GazeboSession:
         return f"""<?xml version="1.0"?>
 <robot name="followdataset_mid360_robot">
   <material name="base_blue">
-    <color rgba="0.28 0.46 0.78 0.08"/>
+    <color rgba="0.28 0.46 0.78 0.0"/>
   </material>
   <material name="wheel_gray">
-    <color rgba="0.60 0.60 0.60 1.0"/>
+    <color rgba="0.60 0.60 0.60 0.0"/>
   </material>
   <material name="leg_gray">
-    <color rgba="0.35 0.38 0.44 1.0"/>
+    <color rgba="0.35 0.38 0.44 0.0"/>
   </material>
   <material name="mid360_purple">
-    <color rgba="0.45 0.35 0.75 1.0"/>
+    <color rgba="0.45 0.35 0.75 0.0"/>
   </material>
 
   <link name="base_footprint"/>
@@ -733,11 +905,6 @@ class Mid360GazeboSession:
       </geometry>
       <material name="wheel_gray"/>
     </visual>
-    <collision>
-      <geometry>
-        <cylinder radius="0.085" length="0.04"/>
-      </geometry>
-    </collision>
   </link>
 
   <joint name="right_upper_front_joint" type="fixed">
@@ -810,11 +977,6 @@ class Mid360GazeboSession:
       </geometry>
       <material name="wheel_gray"/>
     </visual>
-    <collision>
-      <geometry>
-        <cylinder radius="0.085" length="0.04"/>
-      </geometry>
-    </collision>
   </link>
 
   <joint name="mid360_mount_joint" type="fixed">
@@ -847,16 +1009,10 @@ class Mid360GazeboSession:
       </geometry>
       <material name="mid360_purple"/>
     </visual>
-    <collision>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry>
-        <cylinder radius="0.05" length="0.07"/>
-      </geometry>
-    </collision>
 {mesh_visual_xml}  </link>
 
   <gazebo reference="base_link">
-    <material>Gazebo/BlueTransparent</material>
+    <material>Gazebo/Transparent</material>
     <turnGravityOff>true</turnGravityOff>
   </gazebo>
   <gazebo reference="left_wheel_link">
@@ -864,7 +1020,7 @@ class Mid360GazeboSession:
     <mu2>1.0</mu2>
     <kp>1000000.0</kp>
     <kd>10.0</kd>
-    <material>Gazebo/Gray</material>
+    <material>Gazebo/Transparent</material>
     <turnGravityOff>true</turnGravityOff>
   </gazebo>
   <gazebo reference="right_wheel_link">
@@ -872,7 +1028,7 @@ class Mid360GazeboSession:
     <mu2>1.0</mu2>
     <kp>1000000.0</kp>
     <kd>10.0</kd>
-    <material>Gazebo/Gray</material>
+    <material>Gazebo/Transparent</material>
     <turnGravityOff>true</turnGravityOff>
   </gazebo>
   <gazebo reference="{self.config.frame_name}">

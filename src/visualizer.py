@@ -22,6 +22,7 @@ class Visualizer:
         'lookahead': (255, 240, 120),    # Lookahead points - bright yellow
         'path_robot': (255, 100, 100),   # Robot trajectory - red
         'path_human': (100, 150, 255),   # Human trajectory - blue
+        'point_cloud': (110, 230, 255),  # Point cloud projected to XY plane
         'robot': (255, 180, 50),         # Robot - orange
         'robot_radius': (255, 220, 120),
         'human': (150, 200, 255),        # Human - light blue
@@ -74,6 +75,7 @@ class Visualizer:
             "nominal_planned_path": True,
             "safe_planned_path": True,
             "lookahead_points": True,
+            "point_cloud": True,
             "robot_trajectory": True,
             "human_trajectory": True,
             "obstacles": True,
@@ -125,6 +127,7 @@ class Visualizer:
             {"key": "nominal_planned_path", "label": "Diffusion Raw", "color": self.COLORS["path_plan_raw"]},
             {"key": "safe_planned_path", "label": "QP Path", "color": self.COLORS["path_plan_qp"]},
             {"key": "lookahead_points", "label": "Lookahead", "color": self.COLORS["lookahead"]},
+            {"key": "point_cloud", "label": "PointCloud XY", "color": self.COLORS["point_cloud"]},
             {"key": "robot_trajectory", "label": "Robot Trail", "color": self.COLORS["path_robot"]},
             {"key": "human_trajectory", "label": "Human Trail", "color": self.COLORS["path_human"]},
             {"key": "obstacles", "label": "Circle Obstacles", "color": self.COLORS["obstacle"]},
@@ -249,6 +252,20 @@ class Visualizer:
             screen_pos = self.world_to_screen(point)
             pygame.draw.circle(self.screen, color, screen_pos, radius)
             pygame.draw.circle(self.screen, (255, 255, 255), screen_pos, max(1, radius - 2), 1)
+
+    def draw_point_cloud(self, points: np.ndarray, color: tuple, radius: int = 2, max_points: int = 3000):
+        """Draw dense XY-projected point cloud without per-point outlines."""
+        if points is None or len(points) == 0:
+            return
+        pts = np.asarray(points, dtype=np.float32)
+        if pts.ndim != 2 or pts.shape[1] < 2:
+            return
+        if len(pts) > max_points:
+            stride = int(np.ceil(len(pts) / float(max_points)))
+            pts = pts[::max(1, stride)]
+        for point in pts:
+            screen_pos = self.world_to_screen(point[:2])
+            pygame.draw.circle(self.screen, color, screen_pos, radius)
 
     def _parse_inflation(self, inflation: Optional[tuple]):
         if inflation is None:
@@ -737,6 +754,7 @@ class Visualizer:
         nominal_planned_path: Optional[np.ndarray] = None,
         safe_planned_path: Optional[np.ndarray] = None,
         lookahead_points: Optional[np.ndarray] = None,
+        point_cloud: Optional[np.ndarray] = None,
         obstacles: Optional[np.ndarray] = None,
         segment_obstacles: Optional[np.ndarray] = None,
         obs_obstacles: Optional[np.ndarray] = None,
@@ -826,6 +844,10 @@ class Visualizer:
         if lookahead_points is not None and len(lookahead_points) > 0:
             if self.layer_visibility.get("lookahead_points", True):
                 self.draw_points(lookahead_points, self.COLORS['lookahead'], 5)
+
+        if point_cloud is not None and len(point_cloud) > 0:
+            if self.layer_visibility.get("point_cloud", True):
+                self.draw_point_cloud(point_cloud, self.COLORS["point_cloud"], radius=2)
         
         # Draw trajectories
         if robot_trajectory is not None and len(robot_trajectory) > 1:

@@ -204,6 +204,21 @@ class DataStorage:
             'human_path': root['human_path'][:],
             'timestamps': root['timestamps'][:]
         }
+
+        optional_keys = [
+            'robot_base_pose',
+            'human_base_pose',
+            'mid360_pose',
+            'point_cloud_values',
+            'point_cloud_offsets',
+            'point_cloud_sizes',
+            'point_cloud_timestamps',
+        ]
+        for key in optional_keys:
+            if key in root:
+                data[key] = root[key][:]
+        if 'point_cloud_fields' in root.attrs:
+            data['point_cloud_fields'] = list(root.attrs['point_cloud_fields'])
         
         # 加载元数据
         meta_path = os.path.join(episode_dir, "metadata.json")

@@ -85,6 +85,20 @@ python collect.py --backend mid360 \
 
 其中点云使用拼接数组 + offsets 的方式保存每帧 ragged point cloud。
 
+## 离线补点云
+
+如果已有 episode 里只有轨迹和 vector map，可以直接离线回放并补采点云：
+
+```bash
+python replay.py --collect-pointcloud --all --overwrite
+```
+
+常用参数：
+
+- `--episode episode_xxx` 只处理单个 episode
+- `--num-rays 360` 调整每帧射线数
+- `--max-range 20` 调整最大量程
+
 ## 开发文档
 
 - [最近一次安全过滤提交说明](docs/commit_82ed297_qp_safety_filter_zh.md)

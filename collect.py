@@ -428,9 +428,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Mid-360 plugin downsample factor. Larger means fewer points.",
     )
     parser.add_argument(
-        "--headless",
+        "--gazebo-gui",
         action="store_true",
-        help="Launch Gazebo without GUI in mid360 mode.",
+        help="Launch Gazebo with GUI in mid360 mode. Default is headless.",
     )
     parser.add_argument(
         "--no-mid360-visualize",
@@ -456,7 +456,7 @@ def create_collector_from_args(args: argparse.Namespace):
         plugin_dir=plugin_dir,
         plugin_library_path=plugin_library,
         downsample=max(1, int(args.mid360_downsample)),
-        gui=not bool(args.headless),
+        gui=bool(args.gazebo_gui),
         visualize_laser=not bool(args.no_mid360_visualize),
     )
 
