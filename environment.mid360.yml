@@ -1,0 +1,15 @@
+name: data-env-mid360
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.8
+  - numpy
+  - scipy
+  - matplotlib
+  - pip
+  - pip:
+    - pygame
+    - zarr
+    - numcodecs
+    - plotly

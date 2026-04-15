@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 Path Generator - Generate random reference paths (tactile paving style)
 """

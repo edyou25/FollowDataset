@@ -9,6 +9,13 @@ conda env create -f environment.yml
 conda activate data-env
 ```
 
+如果要跑 `mid360` 3D 仿真，建议单独用与 ROS Noetic 对齐的 Python 3.8 环境：
+
+```bash
+conda env create -f environment.mid360.yml
+conda activate data-env-mid360
+```
+
 ## 使用
 
 ```bash
@@ -56,8 +63,9 @@ T_base_mid360 =
 运行 `mid360` 模式前需要：
 
 1. 安装并 `source` ROS Noetic + Gazebo11 环境。
-2. 编译 `Mid360_simulation_plugin`，保证 `liblivox_laser_simulation.so` 可被发现。
-3. 如果库不在默认 catkin 位置，显式传入：
+2. 使用 Python 3.8 环境，避免和 Noetic 自带的 `rospy`/`sensor_msgs` 版本冲突。
+3. 编译 `Mid360_simulation_plugin`，保证 `liblivox_laser_simulation.so` 可被发现。
+4. 如果库不在默认 catkin 位置，显式传入：
 
 ```bash
 python collect.py --backend mid360 \

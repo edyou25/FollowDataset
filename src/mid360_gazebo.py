@@ -91,6 +91,8 @@ def resolve_mid360_plugin_library(
             plugin_dir / "devel" / "lib" / "liblivox_laser_simulation.so",
             plugin_dir / "build" / "devel" / "lib" / "liblivox_laser_simulation.so",
             plugin_dir / "build" / "lib" / "liblivox_laser_simulation.so",
+            plugin_dir.parent / "mid360_catkin_ws" / "devel" / "lib" / "liblivox_laser_simulation.so",
+            plugin_dir.parent / "catkin_ws" / "devel" / "lib" / "liblivox_laser_simulation.so",
             plugin_dir.parent / "devel" / "lib" / "liblivox_laser_simulation.so",
             plugin_dir.parent.parent / "devel" / "lib" / "liblivox_laser_simulation.so",
         ]
@@ -123,7 +125,9 @@ class Mid360GazeboConfig:
     obstacle_height_step: float = 0.35
     guide_strip_width: float = 0.16
     guide_strip_height: float = 0.02
-    robot_base_size: tuple[float, float, float] = (0.55, 0.42, 0.25)
+    robot_base_size: tuple[float, float, float] = (0.48, 0.36, 0.14)
+    robot_base_z: float = 0.155
+    robot_model_z: float = 0.0
     human_radius: float = 0.22
     human_height: float = 1.72
     keep_runtime_artifacts: bool = True
@@ -156,7 +160,7 @@ class Mid360GazeboSession:
         ).resolve()
 
         self.world_path = self.runtime_dir / "world.sdf"
-        self.robot_model_path = self.runtime_dir / "robot.sdf"
+        self.robot_model_path = self.runtime_dir / "robot.urdf"
         self.human_model_path = self.runtime_dir / "human.sdf"
         self.roscore_log_path = self.runtime_dir / "roscore.log"
         self.gazebo_log_path = self.runtime_dir / "gazebo.log"
@@ -174,6 +178,7 @@ class Mid360GazeboSession:
         self.gazebo_srvs = None
 
         self.spawn_model_srv = None
+        self.spawn_urdf_model_srv = None
         self.delete_model_srv = None
         self.set_model_state_srv = None
 
@@ -251,7 +256,7 @@ class Mid360GazeboSession:
             self.robot_model_name,
             x=float(robot_state.position[0]),
             y=float(robot_state.position[1]),
-            z=0.5 * float(self.config.robot_base_size[2]),
+            z=float(self.config.robot_model_z),
             yaw=float(robot_state.heading),
         )
         self._set_model_state(
@@ -266,7 +271,7 @@ class Mid360GazeboSession:
         return self._pose_vector_from_xyz_rpy(
             x=float(robot_state.position[0]),
             y=float(robot_state.position[1]),
-            z=0.5 * float(self.config.robot_base_size[2]),
+            z=float(self.config.robot_base_z),
             roll=0.0,
             pitch=0.0,
             yaw=float(robot_state.heading),
@@ -290,7 +295,7 @@ class Mid360GazeboSession:
             [
                 float(robot_state.position[0]),
                 float(robot_state.position[1]),
-                0.5 * float(self.config.robot_base_size[2]),
+                float(self.config.robot_base_z),
             ],
             dtype=np.float64,
         )
@@ -336,7 +341,7 @@ class Mid360GazeboSession:
 
     def _write_runtime_files(self):
         self.world_path.write_text(self._generate_world_sdf(), encoding="utf-8")
-        self.robot_model_path.write_text(self._generate_robot_sdf(), encoding="utf-8")
+        self.robot_model_path.write_text(self._generate_robot_urdf(), encoding="utf-8")
         self.human_model_path.write_text(self._generate_human_sdf(), encoding="utf-8")
 
     def _import_ros_modules(self):
@@ -428,11 +433,15 @@ class Mid360GazeboSession:
 
     def _bind_gazebo_services(self):
         self.rospy.wait_for_service("/gazebo/spawn_sdf_model", timeout=30.0)
+        self.rospy.wait_for_service("/gazebo/spawn_urdf_model", timeout=30.0)
         self.rospy.wait_for_service("/gazebo/delete_model", timeout=30.0)
         self.rospy.wait_for_service("/gazebo/set_model_state", timeout=30.0)
 
         self.spawn_model_srv = self.rospy.ServiceProxy(
             "/gazebo/spawn_sdf_model", self.gazebo_srvs.SpawnModel
+        )
+        self.spawn_urdf_model_srv = self.rospy.ServiceProxy(
+            "/gazebo/spawn_urdf_model", self.gazebo_srvs.SpawnModel
         )
         self.delete_model_srv = self.rospy.ServiceProxy(
             "/gazebo/delete_model", self.gazebo_srvs.DeleteModel
@@ -443,11 +452,11 @@ class Mid360GazeboSession:
 
     def _spawn_robot(self):
         xml = self.robot_model_path.read_text(encoding="utf-8")
-        self.spawn_model_srv(
+        self.spawn_urdf_model_srv(
             self.robot_model_name,
             xml,
             "",
-            self._pose_msg(0.0, 0.0, 0.5 * float(self.config.robot_base_size[2]), 0.0, 0.0, 0.0),
+            self._pose_msg(0.0, 0.0, float(self.config.robot_model_z), 0.0, 0.0, 0.0),
             "world",
         )
 
@@ -598,113 +607,318 @@ class Mid360GazeboSession:
 </sdf>
 """
 
-    def _generate_robot_sdf(self) -> str:
+    def _generate_robot_urdf(self) -> str:
         mesh_path = (
             self.config.plugin_dir
             / "livox_laser_simulation"
             / "meshes"
             / "livox_mid-360-90x.dae"
         )
-        mesh_xml = ""
+        mesh_visual_xml = ""
         if mesh_path.exists():
-            mesh_xml = f"""
-      <visual name='mid360_visual'>
-        <geometry>
-          <mesh>
-            <uri>file://{mesh_path}</uri>
-            <scale>1 1 1</scale>
-          </mesh>
-        </geometry>
-      </visual>
+            mesh_visual_xml = f"""
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="file://{mesh_path}" scale="1 1 1"/>
+      </geometry>
+    </visual>
 """
 
-        return f"""<?xml version='1.0'?>
-<sdf version='1.6'>
-  <model name='followdataset_mid360_robot'>
-    <static>false</static>
-    <allow_auto_disable>false</allow_auto_disable>
-    <link name='base_link'>
-      <gravity>false</gravity>
-      <self_collide>false</self_collide>
-      <inertial>
-        <mass>10.0</mass>
-        <inertia>
-          <ixx>0.4</ixx>
-          <iyy>0.4</iyy>
-          <izz>0.4</izz>
-        </inertia>
-      </inertial>
-      <collision name='base_collision'>
-        <geometry>
-          <box>
-            <size>{self.config.robot_base_size[0]} {self.config.robot_base_size[1]} {self.config.robot_base_size[2]}</size>
-          </box>
-        </geometry>
-      </collision>
-      <visual name='base_visual'>
-        <geometry>
-          <box>
-            <size>{self.config.robot_base_size[0]} {self.config.robot_base_size[1]} {self.config.robot_base_size[2]}</size>
-          </box>
-        </geometry>
-        <material>
-          <ambient>0.28 0.46 0.78 1</ambient>
-          <diffuse>0.28 0.46 0.78 1</diffuse>
-        </material>
-      </visual>
-    </link>
-    <link name='{self.config.frame_name}'>
-      <pose>{MID360_MOUNT_XYZ[0]} {MID360_MOUNT_XYZ[1]} {MID360_MOUNT_XYZ[2]} {MID360_MOUNT_RPY[0]} {MID360_MOUNT_RPY[1]} {MID360_MOUNT_RPY[2]}</pose>
-      <gravity>false</gravity>
-      {mesh_xml}
-      <sensor type='ray' name='laser_livox'>
-        <pose>0 0 0 0 0 0</pose>
-        <visualize>{'true' if self.config.visualize_laser else 'false'}</visualize>
-        <always_on>true</always_on>
-        <update_rate>{self.config.update_rate}</update_rate>
-        <plugin name='gazebo_ros_laser_controller' filename='liblivox_laser_simulation.so'>
-          <ray>
-            <scan>
-              <horizontal>
-                <samples>100</samples>
-                <resolution>1</resolution>
-                <min_angle>-3.1415926535897931</min_angle>
-                <max_angle>3.1415926535897931</max_angle>
-              </horizontal>
-              <vertical>
-                <samples>50</samples>
-                <resolution>1</resolution>
-                <min_angle>-3.1415926535897931</min_angle>
-                <max_angle>3.1415926535897931</max_angle>
-              </vertical>
-            </scan>
-            <range>
-              <min>{self.config.range_min}</min>
-              <max>{self.config.range_max}</max>
+        return f"""<?xml version="1.0"?>
+<robot name="followdataset_mid360_robot">
+  <material name="base_blue">
+    <color rgba="0.28 0.46 0.78 0.08"/>
+  </material>
+  <material name="wheel_gray">
+    <color rgba="0.60 0.60 0.60 1.0"/>
+  </material>
+  <material name="leg_gray">
+    <color rgba="0.35 0.38 0.44 1.0"/>
+  </material>
+  <material name="mid360_purple">
+    <color rgba="0.45 0.35 0.75 1.0"/>
+  </material>
+
+  <link name="base_footprint"/>
+
+  <joint name="base_footprint_joint" type="fixed">
+    <parent link="base_footprint"/>
+    <child link="base_link"/>
+    <origin xyz="0 0 {self.config.robot_base_z}" rpy="0 0 0"/>
+  </joint>
+
+  <link name="base_link">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <mass value="18.0"/>
+      <inertia ixx="0.28" ixy="0.0" ixz="0.0" iyy="0.40" iyz="0.0" izz="0.55"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="{self.config.robot_base_size[0]} {self.config.robot_base_size[1]} {self.config.robot_base_size[2]}"/>
+      </geometry>
+      <material name="base_blue"/>
+    </visual>
+  </link>
+
+  <joint name="left_upper_front_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="left_upper_front_link"/>
+    <origin xyz="0.10 0.18 -0.02" rpy="0 1.57079633 0"/>
+  </joint>
+  <link name="left_upper_front_link">
+    <visual>
+      <geometry>
+        <cylinder radius="0.015" length="0.24"/>
+      </geometry>
+      <material name="leg_gray"/>
+    </visual>
+  </link>
+  <joint name="left_upper_rear_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="left_upper_rear_link"/>
+    <origin xyz="-0.06 0.18 -0.02" rpy="0 1.57079633 0"/>
+  </joint>
+  <link name="left_upper_rear_link">
+    <visual>
+      <geometry>
+        <cylinder radius="0.015" length="0.22"/>
+      </geometry>
+      <material name="leg_gray"/>
+    </visual>
+  </link>
+  <joint name="left_lower_front_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="left_lower_front_link"/>
+    <origin xyz="0.10 0.18 -0.12" rpy="0 1.57079633 0"/>
+  </joint>
+  <link name="left_lower_front_link">
+    <visual>
+      <geometry>
+        <cylinder radius="0.014" length="0.20"/>
+      </geometry>
+      <material name="leg_gray"/>
+    </visual>
+  </link>
+  <joint name="left_lower_rear_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="left_lower_rear_link"/>
+    <origin xyz="-0.06 0.18 -0.12" rpy="0 1.57079633 0"/>
+  </joint>
+  <link name="left_lower_rear_link">
+    <visual>
+      <geometry>
+        <cylinder radius="0.014" length="0.18"/>
+      </geometry>
+      <material name="leg_gray"/>
+    </visual>
+  </link>
+  <joint name="left_wheel_joint" type="continuous">
+    <parent link="base_link"/>
+    <child link="left_wheel_link"/>
+    <origin xyz="0.02 0.20 -0.07" rpy="1.57079633 0 0"/>
+    <axis xyz="0 0 1"/>
+  </joint>
+  <link name="left_wheel_link">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <mass value="1.2"/>
+      <inertia ixx="0.004" ixy="0.0" ixz="0.0" iyy="0.0025" iyz="0.0" izz="0.0025"/>
+    </inertial>
+    <visual>
+      <geometry>
+        <cylinder radius="0.085" length="0.04"/>
+      </geometry>
+      <material name="wheel_gray"/>
+    </visual>
+    <collision>
+      <geometry>
+        <cylinder radius="0.085" length="0.04"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <joint name="right_upper_front_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="right_upper_front_link"/>
+    <origin xyz="0.10 -0.18 -0.02" rpy="0 1.57079633 0"/>
+  </joint>
+  <link name="right_upper_front_link">
+    <visual>
+      <geometry>
+        <cylinder radius="0.015" length="0.24"/>
+      </geometry>
+      <material name="leg_gray"/>
+    </visual>
+  </link>
+  <joint name="right_upper_rear_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="right_upper_rear_link"/>
+    <origin xyz="-0.06 -0.18 -0.02" rpy="0 1.57079633 0"/>
+  </joint>
+  <link name="right_upper_rear_link">
+    <visual>
+      <geometry>
+        <cylinder radius="0.015" length="0.22"/>
+      </geometry>
+      <material name="leg_gray"/>
+    </visual>
+  </link>
+  <joint name="right_lower_front_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="right_lower_front_link"/>
+    <origin xyz="0.10 -0.18 -0.12" rpy="0 1.57079633 0"/>
+  </joint>
+  <link name="right_lower_front_link">
+    <visual>
+      <geometry>
+        <cylinder radius="0.014" length="0.20"/>
+      </geometry>
+      <material name="leg_gray"/>
+    </visual>
+  </link>
+  <joint name="right_lower_rear_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="right_lower_rear_link"/>
+    <origin xyz="-0.06 -0.18 -0.12" rpy="0 1.57079633 0"/>
+  </joint>
+  <link name="right_lower_rear_link">
+    <visual>
+      <geometry>
+        <cylinder radius="0.014" length="0.18"/>
+      </geometry>
+      <material name="leg_gray"/>
+    </visual>
+  </link>
+  <joint name="right_wheel_joint" type="continuous">
+    <parent link="base_link"/>
+    <child link="right_wheel_link"/>
+    <origin xyz="0.02 -0.20 -0.07" rpy="1.57079633 0 0"/>
+    <axis xyz="0 0 1"/>
+  </joint>
+  <link name="right_wheel_link">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <mass value="1.2"/>
+      <inertia ixx="0.004" ixy="0.0" ixz="0.0" iyy="0.0025" iyz="0.0" izz="0.0025"/>
+    </inertial>
+    <visual>
+      <geometry>
+        <cylinder radius="0.085" length="0.04"/>
+      </geometry>
+      <material name="wheel_gray"/>
+    </visual>
+    <collision>
+      <geometry>
+        <cylinder radius="0.085" length="0.04"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <joint name="mid360_mount_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="mid360_mount_link"/>
+    <origin xyz="{MID360_MOUNT_XYZ[0]} {MID360_MOUNT_XYZ[1]} {MID360_MOUNT_XYZ[2]}" rpy="{MID360_MOUNT_RPY[0]} {MID360_MOUNT_RPY[1]} {MID360_MOUNT_RPY[2]}"/>
+  </joint>
+  <link name="mid360_mount_link">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <mass value="0.05"/>
+      <inertia ixx="1e-4" ixy="0.0" ixz="0.0" iyy="1e-4" iyz="0.0" izz="1e-4"/>
+    </inertial>
+  </link>
+  <joint name="mid360_joint" type="fixed">
+    <parent link="mid360_mount_link"/>
+    <child link="{self.config.frame_name}"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+  <link name="{self.config.frame_name}">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <mass value="0.30"/>
+      <inertia ixx="3e-4" ixy="0.0" ixz="0.0" iyy="3e-4" iyz="0.0" izz="3e-4"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <cylinder radius="0.05" length="0.07"/>
+      </geometry>
+      <material name="mid360_purple"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <cylinder radius="0.05" length="0.07"/>
+      </geometry>
+    </collision>
+{mesh_visual_xml}  </link>
+
+  <gazebo reference="base_link">
+    <material>Gazebo/BlueTransparent</material>
+    <turnGravityOff>true</turnGravityOff>
+  </gazebo>
+  <gazebo reference="left_wheel_link">
+    <mu1>1.0</mu1>
+    <mu2>1.0</mu2>
+    <kp>1000000.0</kp>
+    <kd>10.0</kd>
+    <material>Gazebo/Gray</material>
+    <turnGravityOff>true</turnGravityOff>
+  </gazebo>
+  <gazebo reference="right_wheel_link">
+    <mu1>1.0</mu1>
+    <mu2>1.0</mu2>
+    <kp>1000000.0</kp>
+    <kd>10.0</kd>
+    <material>Gazebo/Gray</material>
+    <turnGravityOff>true</turnGravityOff>
+  </gazebo>
+  <gazebo reference="{self.config.frame_name}">
+    <sensor type="ray" name="mid360_sensor">
+      <always_on>true</always_on>
+      <visualize>{'true' if self.config.visualize_laser else 'false'}</visualize>
+      <update_rate>{self.config.update_rate}</update_rate>
+      <pose>0 0 0 0 0 0</pose>
+      <plugin name="gazebo_ros_laser_controller" filename="liblivox_laser_simulation.so">
+        <ray>
+          <scan>
+            <horizontal>
+              <samples>100</samples>
               <resolution>1</resolution>
-            </range>
-            <noise>
-              <type>gaussian</type>
-              <mean>0.0</mean>
-              <stddev>0.0</stddev>
-            </noise>
-          </ray>
-          <visualize>{'True' if self.config.visualize_laser else 'False'}</visualize>
-          <samples>{self.config.samples}</samples>
-          <downsample>{self.config.downsample}</downsample>
-          <csv_file_name>mid360-real-centr.csv</csv_file_name>
-          <publish_pointcloud_type>2</publish_pointcloud_type>
-          <ros_topic>{self.config.ros_topic}</ros_topic>
-          <frameName>{self.config.frame_name}</frameName>
-        </plugin>
-      </sensor>
-    </link>
-    <joint name='mid360_mount_joint' type='fixed'>
-      <parent>base_link</parent>
-      <child>{self.config.frame_name}</child>
-    </joint>
-  </model>
-</sdf>
+              <min_angle>-3.1415926535897931</min_angle>
+              <max_angle>3.1415926535897931</max_angle>
+            </horizontal>
+            <vertical>
+              <samples>50</samples>
+              <resolution>1</resolution>
+              <min_angle>-3.1415926535897931</min_angle>
+              <max_angle>3.1415926535897931</max_angle>
+            </vertical>
+          </scan>
+          <range>
+            <min>{self.config.range_min}</min>
+            <max>{self.config.range_max}</max>
+            <resolution>1</resolution>
+          </range>
+          <noise>
+            <type>gaussian</type>
+            <mean>0.0</mean>
+            <stddev>0.0</stddev>
+          </noise>
+        </ray>
+        <visualize>{'True' if self.config.visualize_laser else 'False'}</visualize>
+        <samples>{self.config.samples}</samples>
+        <downsample>{self.config.downsample}</downsample>
+        <csv_file_name>mid360-real-centr.csv</csv_file_name>
+        <publish_pointcloud_type>2</publish_pointcloud_type>
+        <ros_topic>{self.config.ros_topic}</ros_topic>
+        <frameName>{self.config.frame_name}</frameName>
+      </plugin>
+    </sensor>
+  </gazebo>
+</robot>
 """
 
     def _generate_human_sdf(self) -> str:

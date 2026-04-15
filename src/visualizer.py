@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 Visualization module - pygame real-time display
 """
