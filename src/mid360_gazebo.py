@@ -292,7 +292,7 @@ class Mid360GazeboSession:
                     continue
                 try:
                     os.kill(pid, signal.SIGTERM)
-                except ProcessLookupError:
+                except (ProcessLookupError, PermissionError):
                     continue
 
         if not self.config.keep_runtime_artifacts:
@@ -495,7 +495,7 @@ class Mid360GazeboSession:
                     continue
                 try:
                     os.kill(pid, signal.SIGTERM)
-                except ProcessLookupError:
+                except (ProcessLookupError, PermissionError):
                     pass
         time.sleep(1.0)
 

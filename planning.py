@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from __future__ import annotations
 """
 Guide Dog Robot Planning Tool (model-based simulation)
 
@@ -15,6 +16,7 @@ import argparse
 import copy
 import json
 import importlib
+import re
 import sys
 from collections import deque
 from datetime import datetime
@@ -25,6 +27,7 @@ import numpy as np
 import pygame
 import torch
 import dill
+from scipy.spatial.transform import Rotation
 
 # Allow importing project modules when running from the FollowDataset directory
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -44,6 +47,19 @@ from src.physics import PhysicsEngine
 from src.visualizer import Visualizer
 from src.scoring import TrajectoryScorer
 from src.safety_filter import QPSafetyFilter
+from src.mid360_gazebo import (
+    Mid360GazeboConfig,
+    Mid360GazeboSession,
+    T_BASE_MID360,
+    resolve_mid360_plugin_dir,
+    resolve_mid360_plugin_library,
+)
+from src.vector_map_pointcloud import VectorMapPointCloudConfig, VectorMapPointCloudSimulator
+from diffusion_policy.common.guide_mid360 import (
+    GuideMid360ObservationConfig,
+    encode_mid360_scan_from_pointcloud,
+    encode_mid360_scan_from_local_points,
+)
 
 
 def _resolve_class(dotted_path: str):
@@ -91,6 +107,45 @@ def resolve_device(device: str) -> torch.device:
     return torch.device(device)
 
 
+def resolve_default_checkpoint() -> Path:
+    outputs_dir = PROJECT_ROOT / "diffusion_policy" / "data" / "outputs"
+    fallback = Path(
+        "/home/yyf/IROS2026/diffusion_policy/data/outputs/2026.01.21/14.14.46_train_diffusion_unet_lowdim_guide_guide_lowdim/checkpoints/epoch=0090-test_mean_score=0.630.ckpt"
+    )
+    if not outputs_dir.exists():
+        return fallback
+
+    score_pattern = re.compile(r"test_mean_score=([0-9.]+)\.ckpt$")
+    mid360_scored: list[tuple[float, float, Path]] = []
+    mid360_latest: list[tuple[float, Path]] = []
+
+    for ckpt in outputs_dir.rglob("*.ckpt"):
+        path_str = str(ckpt)
+        if "guide_mid360" not in path_str:
+            continue
+        try:
+            mtime = ckpt.stat().st_mtime
+        except OSError:
+            continue
+        match = score_pattern.search(ckpt.name)
+        if match is not None:
+            try:
+                score = float(match.group(1))
+            except ValueError:
+                score = float("-inf")
+            mid360_scored.append((score, mtime, ckpt))
+        elif ckpt.name == "latest.ckpt":
+            mid360_latest.append((mtime, ckpt))
+
+    if mid360_scored:
+        mid360_scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        return mid360_scored[0][2]
+    if mid360_latest:
+        mid360_latest.sort(key=lambda item: item[0], reverse=True)
+        return mid360_latest[0][1]
+    return fallback
+
+
 def normalize_safety_mode(mode: Optional[str]) -> str:
     mode = str(mode or "off").lower()
     aliases = {
@@ -107,6 +162,27 @@ def normalize_safety_mode(mode: Optional[str]) -> str:
     if mode not in aliases:
         raise ValueError(
             f"Unsupported safety_mode={mode!r} (expected off, robot_qp, or human_robot_qp)"
+        )
+    return aliases[mode]
+
+
+def normalize_pointcloud_mode(mode: Optional[str]) -> str:
+    mode = str(mode or "auto").lower()
+    aliases = {
+        "auto": "auto",
+        "off": "off",
+        "none": "off",
+        "mid360": "vector_map",
+        "vector_map": "vector_map",
+        "gazebo": "gazebo",
+        "ros": "gazebo",
+        "ros_gazebo": "gazebo",
+        "live": "gazebo",
+    }
+    if mode not in aliases:
+        raise ValueError(
+            f"Unsupported pointcloud_mode={mode!r} "
+            "(expected auto, off, vector_map, or gazebo)"
         )
     return aliases[mode]
 
@@ -141,6 +217,12 @@ class ModelPlanner:
         create_visualizer: bool = True,
         collision_behavior: str = "reset",
         safety_mode: str = "off",
+        pointcloud_mode: str = "auto",
+        mid360_plugin_dir: Optional[str] = None,
+        mid360_plugin_lib: Optional[str] = None,
+        mid360_downsample: int = 1,
+        mid360_gazebo_gui: bool = False,
+        mid360_visualize: bool = False,
         safety_margin: float = 0.02,
         safety_alpha: float = 1.0,
         safety_max_constraints: int = 8,
@@ -166,6 +248,16 @@ class ModelPlanner:
 
         # Load policy if checkpoint is provided
         self.device = resolve_device(device)
+        self.requested_pointcloud_mode = normalize_pointcloud_mode(pointcloud_mode)
+        self.mid360_plugin_dir_arg = mid360_plugin_dir
+        self.mid360_plugin_lib_arg = mid360_plugin_lib
+        self.mid360_downsample = max(1, int(mid360_downsample))
+        self.mid360_gazebo_gui = bool(mid360_gazebo_gui)
+        self.mid360_visualize = bool(mid360_visualize)
+        self.mid360_gazebo_config: Optional[Mid360GazeboConfig] = None
+        self.mid360_session: Optional[Mid360GazeboSession] = None
+        self._last_mid360_cloud_seq: Optional[int] = None
+        self._mid360_visual_max_points = 4096
         self.workspace = None
         self.policy = None
         if checkpoint_path is not None and checkpoint_path.exists():
@@ -291,54 +383,154 @@ class ModelPlanner:
                 except Exception:
                     cfg_frame_stride = None
 
+            cfg_task_name = None
+            try:
+                cfg_task_name = self.workspace.cfg.task.get("name")
+            except Exception:
+                cfg_task_name = None
+
+            cfg_dataset_target = None
+            try:
+                cfg_dataset_target = self.workspace.cfg.task.dataset.get("_target_")
+            except Exception:
+                cfg_dataset_target = None
+
+            cfg_lidar_num_bins = None
+            try:
+                cfg_lidar_num_bins = self.workspace.cfg.task.get("lidar_num_bins")
+            except Exception:
+                cfg_lidar_num_bins = None
+            if cfg_lidar_num_bins is None:
+                try:
+                    cfg_lidar_num_bins = self.workspace.cfg.task.dataset.get("lidar_num_bins")
+                except Exception:
+                    cfg_lidar_num_bins = None
+
+            def _cfg_dataset_value(key: str, default=None):
+                try:
+                    value = self.workspace.cfg.task.dataset.get(key)
+                except Exception:
+                    value = None
+                if value is None:
+                    return default
+                return value
+
+            detected_observation_mode = "mid360" if (
+                cfg_lidar_num_bins is not None
+                or str(cfg_task_name or "").lower().endswith("mid360")
+                or "GuideMid360Dataset" in str(cfg_dataset_target or "")
+            ) else "lowdim"
+            self.observation_mode = detected_observation_mode
+            self.pointcloud_mode = self.requested_pointcloud_mode
+            if self.pointcloud_mode == "auto":
+                self.pointcloud_mode = (
+                    "vector_map" if self.observation_mode == "mid360" else "off"
+                )
+            if self.observation_mode == "mid360" and self.pointcloud_mode == "off":
+                raise ValueError(
+                    "pointcloud_mode='off' is incompatible with a guide_mid360 checkpoint. "
+                    "Use pointcloud_mode='auto', 'vector_map', or 'gazebo'."
+                )
+
             self.obs_dim = int(self.policy.obs_dim)
             self.action_dim = int(self.policy.action_dim)
             self.n_obs_steps = int(self.policy.n_obs_steps)
             self.n_action_steps = int(self.policy.n_action_steps)
-            self.n_obstacle_circles = max(0, int(cfg_n_obstacle_circles or 0))
-            self.n_obstacle_segments = max(0, int(cfg_n_obstacle_segments or 0))
-            self.obstacle_include_radius = (
-                True if cfg_obstacle_include_radius is None else bool(cfg_obstacle_include_radius)
+            self.lidar_num_bins = int(cfg_lidar_num_bins or 128)
+            self.mid360_obs_config = GuideMid360ObservationConfig(
+                num_bins=self.lidar_num_bins,
+                min_angle=float(_cfg_dataset_value("lidar_min_angle", -np.pi)),
+                max_angle=float(_cfg_dataset_value("lidar_max_angle", np.pi)),
+                min_range=float(_cfg_dataset_value("lidar_min_range", 0.2)),
+                max_range=float(_cfg_dataset_value("lidar_max_range", 8.0)),
+                ground_height=float(_cfg_dataset_value("lidar_ground_height", 0.1)),
+                max_height=float(_cfg_dataset_value("lidar_max_height", 2.2)),
+                use_world_height=bool(_cfg_dataset_value("lidar_use_world_height", True)),
             )
-            self.obstacle_include_human_clearance = (
-                False
-                if cfg_obstacle_include_human_clearance is None
-                else bool(cfg_obstacle_include_human_clearance)
+            self.mid360_simulator = VectorMapPointCloudSimulator(
+                VectorMapPointCloudConfig(
+                    num_rays=self.lidar_num_bins,
+                    min_angle=self.mid360_obs_config.min_angle,
+                    max_angle=self.mid360_obs_config.max_angle,
+                    min_range=self.mid360_obs_config.min_range,
+                    max_range=self.mid360_obs_config.max_range,
+                    z_height=1.0,
+                )
             )
-            self.segment_repr = str(cfg_segment_repr or "endpoints").lower()
-            if self.segment_repr not in ("endpoints", "closest_dir"):
-                raise ValueError(f"Unsupported segment_repr: {self.segment_repr}")
-            circle_dim = 3 if self.obstacle_include_radius else 2
-            clearance_dim = (
-                (self.n_obstacle_circles + self.n_obstacle_segments)
-                if self.obstacle_include_human_clearance
-                else 0
-            )
-            self.obstacle_obs_dim = (
-                self.n_obstacle_circles * circle_dim + self.n_obstacle_segments * 4 + clearance_dim
-            )
-            if cfg_n_lookahead is None:
-                extra_obs = self.obs_dim - 4 - self.obstacle_obs_dim
-                if extra_obs < 0 or extra_obs % 2 != 0:
-                    raise ValueError(
-                        f"Unsupported obs_dim={self.obs_dim}, expected 4 + 2*N + {self.obstacle_obs_dim}"
-                    )
-                self.n_lookahead = extra_obs // 2
-            else:
-                self.n_lookahead = int(cfg_n_lookahead)
-                expected_obs_dim = 4 + 2 * self.n_lookahead + self.obstacle_obs_dim
-                if self.obs_dim != expected_obs_dim:
-                    extra_obs = self.obs_dim - 4 - self.obstacle_obs_dim
-                    if extra_obs >= 0 and extra_obs % 2 == 0:
-                        self.n_lookahead = extra_obs // 2
-                        print(
-                            f"[warn] obs_dim mismatch (expected {expected_obs_dim}, got {self.obs_dim}); "
-                            f"using derived n_lookahead={self.n_lookahead}"
-                        )
-                    else:
+            if self.observation_mode == "mid360":
+                self.n_obstacle_circles = 0
+                self.n_obstacle_segments = 0
+                self.obstacle_include_radius = False
+                self.obstacle_include_human_clearance = False
+                self.segment_repr = "closest_dir"
+                self.obstacle_obs_dim = 0
+                if cfg_n_lookahead is None:
+                    extra_obs = self.obs_dim - 4 - self.lidar_num_bins
+                    if extra_obs < 0 or extra_obs % 2 != 0:
                         raise ValueError(
-                            f"Unsupported obs_dim={self.obs_dim}, expected {expected_obs_dim}"
+                            f"Unsupported obs_dim={self.obs_dim}, expected 4 + 2*N + {self.lidar_num_bins}"
                         )
+                    self.n_lookahead = extra_obs // 2
+                else:
+                    self.n_lookahead = int(cfg_n_lookahead)
+                    expected_obs_dim = 4 + 2 * self.n_lookahead + self.lidar_num_bins
+                    if self.obs_dim != expected_obs_dim:
+                        extra_obs = self.obs_dim - 4 - self.lidar_num_bins
+                        if extra_obs >= 0 and extra_obs % 2 == 0:
+                            self.n_lookahead = extra_obs // 2
+                            print(
+                                f"[warn] obs_dim mismatch (expected {expected_obs_dim}, got {self.obs_dim}); "
+                                f"using derived n_lookahead={self.n_lookahead}"
+                            )
+                        else:
+                            raise ValueError(
+                                f"Unsupported obs_dim={self.obs_dim}, expected {expected_obs_dim}"
+                            )
+            else:
+                self.n_obstacle_circles = max(0, int(cfg_n_obstacle_circles or 0))
+                self.n_obstacle_segments = max(0, int(cfg_n_obstacle_segments or 0))
+                self.obstacle_include_radius = (
+                    True if cfg_obstacle_include_radius is None else bool(cfg_obstacle_include_radius)
+                )
+                self.obstacle_include_human_clearance = (
+                    False
+                    if cfg_obstacle_include_human_clearance is None
+                    else bool(cfg_obstacle_include_human_clearance)
+                )
+                self.segment_repr = str(cfg_segment_repr or "endpoints").lower()
+                if self.segment_repr not in ("endpoints", "closest_dir"):
+                    raise ValueError(f"Unsupported segment_repr: {self.segment_repr}")
+                circle_dim = 3 if self.obstacle_include_radius else 2
+                clearance_dim = (
+                    (self.n_obstacle_circles + self.n_obstacle_segments)
+                    if self.obstacle_include_human_clearance
+                    else 0
+                )
+                self.obstacle_obs_dim = (
+                    self.n_obstacle_circles * circle_dim + self.n_obstacle_segments * 4 + clearance_dim
+                )
+                if cfg_n_lookahead is None:
+                    extra_obs = self.obs_dim - 4 - self.obstacle_obs_dim
+                    if extra_obs < 0 or extra_obs % 2 != 0:
+                        raise ValueError(
+                            f"Unsupported obs_dim={self.obs_dim}, expected 4 + 2*N + {self.obstacle_obs_dim}"
+                        )
+                    self.n_lookahead = extra_obs // 2
+                else:
+                    self.n_lookahead = int(cfg_n_lookahead)
+                    expected_obs_dim = 4 + 2 * self.n_lookahead + self.obstacle_obs_dim
+                    if self.obs_dim != expected_obs_dim:
+                        extra_obs = self.obs_dim - 4 - self.obstacle_obs_dim
+                        if extra_obs >= 0 and extra_obs % 2 == 0:
+                            self.n_lookahead = extra_obs // 2
+                            print(
+                                f"[warn] obs_dim mismatch (expected {expected_obs_dim}, got {self.obs_dim}); "
+                                f"using derived n_lookahead={self.n_lookahead}"
+                            )
+                        else:
+                            raise ValueError(
+                                f"Unsupported obs_dim={self.obs_dim}, expected {expected_obs_dim}"
+                            )
             stride = k_lookahead if k_lookahead is not None else cfg_k_lookahead
             if stride is None:
                 stride = 5
@@ -351,6 +543,10 @@ class ModelPlanner:
         else:
             # Default values when no checkpoint is provided
             self.action_mode = action_mode or "forward_heading"
+            self.observation_mode = "lowdim"
+            self.pointcloud_mode = (
+                "off" if self.requested_pointcloud_mode == "auto" else self.requested_pointcloud_mode
+            )
             self.robot_frame = True
             self.robot_state = "vel"
             self.obs_dim = 44  # Default: 4 (robot+human) + 2*20 (lookahead) + 0 (no obstacles)
@@ -363,6 +559,27 @@ class ModelPlanner:
             self.obstacle_include_human_clearance = False
             self.segment_repr = "endpoints"
             self.obstacle_obs_dim = 0
+            self.lidar_num_bins = 128
+            self.mid360_obs_config = GuideMid360ObservationConfig(
+                num_bins=self.lidar_num_bins,
+                min_angle=-np.pi,
+                max_angle=np.pi,
+                min_range=0.2,
+                max_range=8.0,
+                ground_height=0.1,
+                max_height=2.2,
+                use_world_height=True,
+            )
+            self.mid360_simulator = VectorMapPointCloudSimulator(
+                VectorMapPointCloudConfig(
+                    num_rays=self.lidar_num_bins,
+                    min_angle=self.mid360_obs_config.min_angle,
+                    max_angle=self.mid360_obs_config.max_angle,
+                    min_range=self.mid360_obs_config.min_range,
+                    max_range=self.mid360_obs_config.max_range,
+                    z_height=1.0,
+                )
+            )
             self.n_lookahead = 20
             self.lookahead_stride = k_lookahead if k_lookahead is not None else 5
             self.frame_stride = frame_stride if frame_stride is not None else 1
@@ -398,6 +615,7 @@ class ModelPlanner:
         self.nominal_planned_path = None
         self.safe_planned_path = None
         self.lookahead_world = None
+        self.current_mid360_points_world = None
         self.frame_count = 0
         self.prev_robot_pos = None
         self.data_step_idx = 0
@@ -457,13 +675,21 @@ class ModelPlanner:
         self.debug_policy = bool(debug_policy)
         self.debug_qp_log = bool(debug_qp_log)
         self.debug_inference_count = 0
+
+        effective_inference_steps = int(inference_steps)
+        if self.observation_mode == "mid360":
+            effective_inference_steps = max(effective_inference_steps, 100)
+        self.inference_steps = effective_inference_steps
         
         # Reduce inference steps for faster performance
         if self.policy is not None and hasattr(self.policy, 'num_inference_steps'):
             original_steps = self.policy.num_inference_steps
-            self.policy.num_inference_steps = inference_steps
-            if original_steps != inference_steps:
-                print(f"Set inference steps to {inference_steps} (original: {original_steps}) for faster performance")
+            self.policy.num_inference_steps = self.inference_steps
+            if original_steps != self.inference_steps:
+                print(
+                    f"Set inference steps to {self.inference_steps} "
+                    f"(original: {original_steps})"
+                )
 
         if log_path is not None:
             log_path = Path(log_path)
@@ -489,8 +715,11 @@ class ModelPlanner:
                     "action_mode": self.action_mode,
                     "robot_frame": bool(self.robot_frame),
                     "robot_state": self.robot_state,
+                    "observation_mode": self.observation_mode,
+                    "pointcloud_mode": self.pointcloud_mode,
                     "n_lookahead": int(self.n_lookahead),
                     "lookahead_stride": int(self.lookahead_stride),
+                    "lidar_num_bins": int(self.lidar_num_bins),
                     "n_obstacle_circles": int(self.n_obstacle_circles),
                     "n_obstacle_segments": int(self.n_obstacle_segments),
                     "obstacle_obs_dim": int(self.obstacle_obs_dim),
@@ -500,6 +729,7 @@ class ModelPlanner:
                     ),
                     "segment_repr": self.segment_repr,
                     "inference_interval": int(self.inference_interval),
+                    "inference_steps": int(self.inference_steps),
                     "turn_gain": float(self.turn_gain),
                     "curvature_slowdown": bool(self.curvature_slowdown),
                     "curvature_scale": float(self.curvature_scale),
@@ -519,6 +749,7 @@ class ModelPlanner:
         """Override the current episode path/obstacles with externally-provided data."""
         self.current_path_data = copy.deepcopy(path_data)
         self._precompute_frenet_cache()
+        self._restart_mid360_gazebo_session_if_needed()
         if reset:
             self._reset_position()
 
@@ -526,6 +757,7 @@ class ModelPlanner:
         """Generate new reference path."""
         self.current_path_data = self.path_generator.generate()
         self._precompute_frenet_cache()
+        self._restart_mid360_gazebo_session_if_needed()
         self._reset_position()
         obstacles = self.current_path_data.get("obstacles")
         obstacle_count = int(len(obstacles)) if obstacles is not None else 0
@@ -559,27 +791,22 @@ class ModelPlanner:
         self.paused = False
         self.collision_pause = False
         self.physics.reset(start)
+        self._last_mid360_cloud_seq = None
+        self._sync_mid360_gazebo_session()
         self.robot_trajectory = []
         self.human_trajectory = []
         self.planned_path = None
         self.nominal_planned_path = None
         self.safe_planned_path = None
+        self.current_mid360_points_world = None
         self.frame_count = 0
         self.prev_robot_pos = None
         self._seed_obs_history(self.physics.robot.position, self.physics.human.position)
         if self.policy is not None:
             self.policy.reset()
         # Reset action cache
-        self.cached_action_seq = None
-        self.cached_nominal_delta_seq = None
-        self.cached_safe_delta_seq = None
-        self.cached_safety_info_seq = None
-        self.cached_action_idx = 0
-        self.frames_since_inference = 0
+        self._reset_runtime_caches()
         self.data_step_idx = 0
-        self.cached_control = (0.0, 0.0)
-        self.current_action = None
-        self.current_delta = None
         self.episode_safety_stats = {
             "modified_steps": 0,
             "total_steps": 0,
@@ -595,6 +822,198 @@ class ModelPlanner:
         for _ in range(self.n_obs_steps):
             self.obs_history.append(obs.copy())
         self.prev_robot_pos = robot_pos.copy()
+
+    def _reset_runtime_caches(self):
+        self.cached_action_seq = None
+        self.cached_nominal_delta_seq = None
+        self.cached_safe_delta_seq = None
+        self.cached_safety_info_seq = None
+        self.cached_action_idx = 0
+        self.frames_since_inference = 0
+        self.cached_control = (0.0, 0.0)
+        self.current_action = None
+        self.current_delta = None
+        self.current_speed_scale = 1.0
+        self.planned_path = None
+        self.nominal_planned_path = None
+        self.safe_planned_path = None
+
+    def _supported_pointcloud_modes(self) -> list[str]:
+        if self.observation_mode == "mid360":
+            return ["vector_map", "gazebo"]
+        return ["off", "vector_map", "gazebo"]
+
+    def _resolve_mid360_gazebo_config(self) -> Mid360GazeboConfig:
+        if self.mid360_gazebo_config is None:
+            plugin_dir = resolve_mid360_plugin_dir(self.mid360_plugin_dir_arg)
+            plugin_library = resolve_mid360_plugin_library(plugin_dir, self.mid360_plugin_lib_arg)
+            self.mid360_gazebo_config = Mid360GazeboConfig(
+                plugin_dir=plugin_dir,
+                plugin_library_path=plugin_library,
+                downsample=self.mid360_downsample,
+                update_rate=float(max(1, self.fps)),
+                gui=self.mid360_gazebo_gui,
+                visualize_laser=self.mid360_visualize,
+            )
+        return self.mid360_gazebo_config
+
+    def _close_mid360_gazebo_session(self):
+        if self.mid360_session is not None:
+            try:
+                self.mid360_session.close()
+            except Exception as exc:
+                print(f"[warn] failed to close Mid360 Gazebo session cleanly: {exc}")
+            self.mid360_session = None
+        self._last_mid360_cloud_seq = None
+
+    def _ensure_mid360_gazebo_session(self):
+        if self.mid360_session is not None:
+            return
+        if self.current_path_data is None:
+            return
+        config = self._resolve_mid360_gazebo_config()
+        self.mid360_session = Mid360GazeboSession(self.current_path_data, config)
+        try:
+            self.mid360_session.start()
+        except Exception:
+            self._close_mid360_gazebo_session()
+            raise
+        self._last_mid360_cloud_seq = None
+        self._sync_mid360_gazebo_session()
+        print(f"Mid360 Gazebo runtime: {self.mid360_session.runtime_dir}")
+
+    def _restart_mid360_gazebo_session_if_needed(self):
+        if self.pointcloud_mode != "gazebo":
+            self._close_mid360_gazebo_session()
+            return
+        self._close_mid360_gazebo_session()
+        self._ensure_mid360_gazebo_session()
+
+    def _sync_mid360_gazebo_session(self):
+        if self.mid360_session is None:
+            return
+        self.mid360_session.update_entities(self.physics.robot, self.physics.human)
+
+    def _mid360_pose_from_base(self, robot_pos: np.ndarray, heading: float) -> np.ndarray:
+        world_from_base = np.eye(4, dtype=np.float64)
+        world_from_base[:3, :3] = Rotation.from_euler("z", float(heading), degrees=False).as_matrix()
+        robot_base_z = 0.155
+        if self.mid360_gazebo_config is not None:
+            robot_base_z = float(self.mid360_gazebo_config.robot_base_z)
+        world_from_base[:3, 3] = np.array(
+            [float(robot_pos[0]), float(robot_pos[1]), float(robot_base_z)],
+            dtype=np.float64,
+        )
+        world_from_mid360 = world_from_base @ T_BASE_MID360
+        quat = Rotation.from_matrix(world_from_mid360[:3, :3]).as_quat()
+        return np.array(
+            [
+                world_from_mid360[0, 3],
+                world_from_mid360[1, 3],
+                world_from_mid360[2, 3],
+                quat[0],
+                quat[1],
+                quat[2],
+                quat[3],
+            ],
+            dtype=np.float64,
+        )
+
+    def _get_mid360_gazebo_cloud(
+        self,
+        robot_pos: np.ndarray,
+        heading: float,
+        *,
+        wait_timeout: Optional[float] = None,
+    ) -> tuple[np.ndarray, list[str], np.ndarray] | None:
+        self._ensure_mid360_gazebo_session()
+        if self.mid360_session is None:
+            return None
+        timeout = max(float(self.data_dt) * 1.2, 0.15) if wait_timeout is None else max(float(wait_timeout), 0.0)
+        cloud = self.mid360_session.get_pointcloud(
+            after_seq=self._last_mid360_cloud_seq,
+            wait_timeout=timeout,
+        )
+        if cloud is None:
+            cloud = self.mid360_session.get_pointcloud(wait_timeout=0.0)
+        if cloud is None:
+            return None
+        self._last_mid360_cloud_seq = int(cloud.get("seq", 0))
+        frame = np.asarray(cloud.get("points", np.zeros((0, 0), dtype=np.float32)), dtype=np.float32)
+        if frame.ndim == 1:
+            frame = frame.reshape(1, -1)
+        field_names = list(cloud.get("fields", []))
+        mid360_pose = self._mid360_pose_from_base(robot_pos, heading)
+        return frame, field_names, mid360_pose
+
+    def _update_mid360_pointcloud_from_gazebo(
+        self,
+        robot_pos: np.ndarray,
+        heading: float,
+        cloud: tuple[np.ndarray, list[str], np.ndarray] | None = None,
+    ) -> np.ndarray:
+        if self.mid360_obs_config is None:
+            self.current_mid360_points_world = None
+            return np.zeros((0, 2), dtype=np.float32)
+        if cloud is None:
+            cloud = self._get_mid360_gazebo_cloud(robot_pos, heading)
+        if cloud is None:
+            self.current_mid360_points_world = None
+            return np.zeros((0, 2), dtype=np.float32)
+
+        frame, field_names, mid360_pose = cloud
+        field_indices = {str(name): idx for idx, name in enumerate(field_names)}
+        if "x" not in field_indices or "y" not in field_indices:
+            self.current_mid360_points_world = None
+            return np.zeros((0, 2), dtype=np.float32)
+
+        ix = field_indices["x"]
+        iy = field_indices["y"]
+        iz = field_indices.get("z")
+        local_xy = frame[:, [ix, iy]].astype(np.float32, copy=False) if len(frame) > 0 else np.zeros((0, 2), dtype=np.float32)
+        if len(local_xy) == 0:
+            self.current_mid360_points_world = None
+            return local_xy
+
+        ranges = np.linalg.norm(local_xy, axis=-1).astype(np.float32, copy=False)
+        azimuth = np.arctan2(local_xy[:, 1], local_xy[:, 0]).astype(np.float32, copy=False)
+        valid = np.isfinite(local_xy[:, 0]) & np.isfinite(local_xy[:, 1])
+        valid &= np.isfinite(ranges) & np.isfinite(azimuth)
+        valid &= ranges >= float(self.mid360_obs_config.min_range)
+        valid &= ranges <= float(self.mid360_obs_config.max_range)
+        angle_width = float(self.mid360_obs_config.max_angle - self.mid360_obs_config.min_angle)
+        if angle_width < (2.0 * np.pi - 1e-6):
+            valid &= azimuth >= float(self.mid360_obs_config.min_angle)
+            valid &= azimuth < float(self.mid360_obs_config.max_angle)
+
+        local_xyz = np.zeros((len(frame), 3), dtype=np.float32)
+        local_xyz[:, 0] = frame[:, ix].astype(np.float32, copy=False)
+        local_xyz[:, 1] = frame[:, iy].astype(np.float32, copy=False)
+        if iz is not None and frame.shape[1] > iz:
+            local_xyz[:, 2] = frame[:, iz].astype(np.float32, copy=False)
+
+        if iz is not None and frame.shape[1] > iz:
+            if self.mid360_obs_config.use_world_height:
+                rot = Rotation.from_quat(mid360_pose[3:7]).as_matrix().astype(np.float32)
+                height = local_xyz @ rot[2, :].astype(np.float32) + np.float32(mid360_pose[2])
+            else:
+                height = local_xyz[:, 2]
+            valid &= np.isfinite(height)
+            valid &= height >= float(self.mid360_obs_config.ground_height)
+            valid &= height <= float(self.mid360_obs_config.max_height)
+
+        if not np.any(valid):
+            self.current_mid360_points_world = None
+            return np.zeros((0, 2), dtype=np.float32)
+
+        rot = Rotation.from_quat(mid360_pose[3:7]).as_matrix().astype(np.float32)
+        world_xyz = local_xyz @ rot.T + np.asarray(mid360_pose[:3], dtype=np.float32)
+        world_xy = world_xyz[valid, :2].astype(np.float32, copy=False)
+        if len(world_xy) > self._mid360_visual_max_points:
+            stride = max(1, len(world_xy) // self._mid360_visual_max_points)
+            world_xy = world_xy[::stride]
+        self.current_mid360_points_world = world_xy if len(world_xy) > 0 else None
+        return local_xy[valid]
 
     def _log_event(self, name: str, extra: Optional[dict] = None):
         if self.log_fp is None:
@@ -873,6 +1292,8 @@ class ModelPlanner:
                     print("Position reset")
                 elif event.key == pygame.K_m:
                     self._cycle_safety_mode()
+                elif event.key == pygame.K_c:
+                    self._cycle_pointcloud_mode()
                 elif event.key == pygame.K_n:
                     self._generate_new_path()
                 elif event.key == pygame.K_p:
@@ -942,10 +1363,17 @@ class ModelPlanner:
             if self.n_lookahead > 0 and self.current_path_data is not None
             else np.zeros((self.n_lookahead * 2,), dtype=np.float32)
         )
-        obstacle_features = self._build_obstacle_features(robot_pos, human_pos, heading)
+        if self.observation_mode == "mid360":
+            obs_features = self._build_mid360_features(robot_pos, heading)
+        else:
+            if self.pointcloud_mode in ("vector_map", "gazebo"):
+                self._update_mid360_pointcloud(robot_pos, heading)
+            else:
+                self.current_mid360_points_world = None
+            obs_features = self._build_obstacle_features(robot_pos, human_pos, heading)
         if self.n_lookahead <= 0 or self.current_path_data is None:
             self.lookahead_world = None
-        return np.concatenate([base, ref_features, obstacle_features], axis=0).astype(np.float32)
+        return np.concatenate([base, ref_features, obs_features], axis=0).astype(np.float32)
 
     def _build_reference_features(self, robot_pos: np.ndarray, heading: float) -> np.ndarray:
         ref_path = self.current_path_data["path"]
@@ -964,6 +1392,93 @@ class ModelPlanner:
         local_x = cos_h * rel[:, 0] + sin_h * rel[:, 1]
         local_y = -sin_h * rel[:, 0] + cos_h * rel[:, 1]
         return np.stack([local_x, local_y], axis=-1).reshape(-1).astype(np.float32)
+
+    def _simulate_mid360_frame(self, robot_pos: np.ndarray, heading: float) -> np.ndarray:
+        if self.current_path_data is None or self.mid360_simulator is None:
+            return np.zeros((0, 5), dtype=np.float32)
+        obstacles = self.current_path_data.get("obstacles")
+        segments = self.current_path_data.get("segment_obstacles")
+        return self.mid360_simulator.simulate_frame(
+            robot_pos=robot_pos,
+            heading=heading,
+            obstacles=obstacles,
+            segment_obstacles=segments,
+        )
+
+    def _update_mid360_pointcloud(
+        self,
+        robot_pos: np.ndarray,
+        heading: float,
+        frame: Optional[np.ndarray] = None,
+    ) -> np.ndarray:
+        if self.pointcloud_mode == "gazebo":
+            return self._update_mid360_pointcloud_from_gazebo(robot_pos, heading)
+        if frame is None:
+            frame = self._simulate_mid360_frame(robot_pos, heading)
+        if frame is None or len(frame) == 0:
+            self.current_mid360_points_world = None
+            return np.zeros((0, 2), dtype=np.float32)
+
+        local_xy = np.asarray(frame[:, :2], dtype=np.float32)
+        cos_h = float(np.cos(heading))
+        sin_h = float(np.sin(heading))
+        rot = np.array([[cos_h, -sin_h], [sin_h, cos_h]], dtype=np.float32)
+        self.current_mid360_points_world = local_xy @ rot.T + robot_pos.astype(np.float32)
+        return local_xy
+
+    def _build_mid360_features(self, robot_pos: np.ndarray, heading: float) -> np.ndarray:
+        if self.current_path_data is None or self.mid360_obs_config is None:
+            self.current_mid360_points_world = None
+            return np.zeros((self.lidar_num_bins,), dtype=np.float32)
+
+        if self.pointcloud_mode == "gazebo":
+            cloud = self._get_mid360_gazebo_cloud(robot_pos, heading)
+            if cloud is None:
+                self.current_mid360_points_world = None
+                return np.full(
+                    (self.lidar_num_bins,),
+                    self.mid360_obs_config.fill_value,
+                    dtype=np.float32,
+                )
+            frame, field_names, mid360_pose = cloud
+            self._update_mid360_pointcloud_from_gazebo(
+                robot_pos,
+                heading,
+                cloud=cloud,
+            )
+            return encode_mid360_scan_from_pointcloud(
+                frame=frame,
+                field_names=field_names,
+                config=self.mid360_obs_config,
+                mid360_pose=mid360_pose,
+            ).astype(np.float32, copy=False)
+
+        if self.mid360_simulator is None:
+            self.current_mid360_points_world = None
+            return np.full(
+                (self.lidar_num_bins,),
+                self.mid360_obs_config.fill_value,
+                dtype=np.float32,
+            )
+        frame = self._simulate_mid360_frame(robot_pos, heading)
+        local_xy = self._update_mid360_pointcloud(robot_pos, heading, frame=frame)
+        if frame is None or len(frame) == 0:
+            return np.full(
+                (self.lidar_num_bins,),
+                self.mid360_obs_config.fill_value,
+                dtype=np.float32,
+            )
+
+        ranges = np.asarray(frame[:, 3], dtype=np.float32)
+        azimuth = np.asarray(frame[:, 4], dtype=np.float32)
+        scan = encode_mid360_scan_from_local_points(
+            local_xy=local_xy,
+            config=self.mid360_obs_config,
+            ranges=ranges,
+            azimuth=azimuth,
+            height=None,
+        )
+        return scan.astype(np.float32, copy=False)
 
     def _select_obstacles_for_observation(
         self,
@@ -2066,6 +2581,44 @@ class ModelPlanner:
 
         print(f"Safety mode: {self.safety_mode}")
 
+    def _set_pointcloud_mode(self, new_mode: str, *, rebuild_obs_history: bool = True):
+        new_mode = normalize_pointcloud_mode(new_mode)
+        if new_mode == "auto":
+            new_mode = "vector_map" if self.observation_mode == "mid360" else "off"
+        if self.observation_mode == "mid360" and new_mode == "off":
+            raise ValueError("guide_mid360 checkpoint requires pointcloud_mode != 'off'")
+        if new_mode == self.pointcloud_mode:
+            return
+        if new_mode == "gazebo":
+            self._ensure_mid360_gazebo_session()
+        else:
+            self._close_mid360_gazebo_session()
+        self.pointcloud_mode = new_mode
+        self.current_mid360_points_world = None
+        self._last_mid360_cloud_seq = None
+        self._reset_runtime_caches()
+        if rebuild_obs_history:
+            self._seed_obs_history(self.physics.robot.position, self.physics.human.position)
+        if self.log_fp is not None:
+            self._log_event("pointcloud_mode_changed", {"pointcloud_mode": self.pointcloud_mode})
+
+    def _cycle_pointcloud_mode(self):
+        """Cycle point-cloud source during runtime."""
+        modes = self._supported_pointcloud_modes()
+        current = self.pointcloud_mode
+        if current not in modes:
+            current = modes[0]
+        start_idx = modes.index(current)
+        for offset in range(1, len(modes) + 1):
+            candidate = modes[(start_idx + offset) % len(modes)]
+            try:
+                self._set_pointcloud_mode(candidate)
+                print(f"Point cloud mode: {self.pointcloud_mode}")
+                return
+            except Exception as exc:
+                print(f"[warn] failed to switch point cloud mode to {candidate}: {exc}")
+        print(f"Point cloud mode unchanged: {self.pointcloud_mode}")
+
     def _step(self):
         """Advance simulation by one step."""
         self.collision_happened = False
@@ -2358,6 +2911,7 @@ class ModelPlanner:
 
         self.physics.set_control(forward, turn)
         robot_state, human_state = self.physics.step()
+        self._sync_mid360_gazebo_session()
 
         if self._check_collision():
             return self.physics.robot.copy(), self.physics.human.copy()
@@ -2464,10 +3018,12 @@ class ModelPlanner:
             "scores": scores,
             "mode": mode,
             "safety_mode": self.safety_mode,
+            "pointcloud_mode": self.pointcloud_mode,
             "robot_radius": self.physics.robot_radius,
             "human_radius": self.physics.human_radius,
             "controls": [
                 "P: Policy/Manual",
+                "C: PointCloud",
                 "SPACE: Pause",
                 "R: Reset",
                 "N: New Path",
@@ -2494,6 +3050,7 @@ class ModelPlanner:
             nominal_planned_path=self.nominal_planned_path,
             safe_planned_path=self.safe_planned_path,
             lookahead_points=self.lookahead_world,
+            point_cloud=self.current_mid360_points_world,
             obstacles=self.current_path_data.get("obstacles") if self.current_path_data else None,
             segment_obstacles=self.current_path_data.get("segment_obstacles") if self.current_path_data else None,
             obs_obstacles=obs_obstacles,
@@ -2518,7 +3075,7 @@ class ModelPlanner:
         print("=" * 60)
         print("Guide Dog Robot Planning Tool")
         print("=" * 60)
-        print("Controls: P=Policy/Manual | SPACE=Pause | R=Reset | N=NewPath | ESC=Exit")
+        print("Controls: P=Policy/Manual | C=PointCloud | SPACE=Pause | R=Reset | N=NewPath | ESC=Exit")
         print("=" * 60)
 
         while self.running:
@@ -2527,6 +3084,7 @@ class ModelPlanner:
             actual_fps = self.visualizer.tick(self.fps)
             self._render(robot_state, human_state, actual_fps)
 
+        self._close_mid360_gazebo_session()
         self.visualizer.quit()
         if self.log_fp is not None:
             total_steps = max(1, int(self.episode_safety_stats["total_steps"]))
@@ -2556,10 +3114,8 @@ class ModelPlanner:
 def main():
     parser = argparse.ArgumentParser(description="Guide-follow planning with a trained policy")
     
-    # Default checkpoint path - use latest available checkpoint
-    default_ckpt = Path(
-        "/home/yyf/IROS2026/diffusion_policy/data/outputs/2026.01.21/14.14.46_train_diffusion_unet_lowdim_guide_guide_lowdim/checkpoints/epoch=0090-test_mean_score=0.630.ckpt"
-    )
+    # Default checkpoint path - prefer the best available guide_mid360 checkpoint.
+    default_ckpt = resolve_default_checkpoint()
     
     parser.add_argument(
         "--ckpt",
@@ -2587,6 +3143,39 @@ def main():
         type=int,
         default=None,
         help="Downsample factor for simulated steps (matches dataset frame_stride)",
+    )
+    parser.add_argument(
+        "--pointcloud-mode",
+        default="auto",
+        help="auto | off | vector_map | gazebo. `mid360` is kept as an alias of vector_map.",
+    )
+    parser.add_argument(
+        "--mid360-plugin-dir",
+        type=str,
+        default=None,
+        help="Path to the Mid360_simulation_plugin repository for Gazebo point clouds.",
+    )
+    parser.add_argument(
+        "--mid360-plugin-lib",
+        type=str,
+        default=None,
+        help="Path to liblivox_laser_simulation.so for Gazebo point clouds.",
+    )
+    parser.add_argument(
+        "--mid360-downsample",
+        type=int,
+        default=1,
+        help="Downsample factor passed to the Mid360 Gazebo plugin.",
+    )
+    parser.add_argument(
+        "--mid360-gazebo-gui",
+        action="store_true",
+        help="Launch Gazebo with GUI when pointcloud_mode=gazebo.",
+    )
+    parser.add_argument(
+        "--mid360-visualize",
+        action="store_true",
+        help="Enable laser ray visualization in Gazebo when pointcloud_mode=gazebo.",
     )
     parser.add_argument("--path-length", type=float, default=50.0)
     parser.add_argument("--leash-length", type=float, default=1.5)
@@ -2701,6 +3290,12 @@ def main():
         action_mode=args.action_mode,
         k_lookahead=args.k_lookahead,
         frame_stride=args.frame_stride,
+        pointcloud_mode=args.pointcloud_mode,
+        mid360_plugin_dir=args.mid360_plugin_dir,
+        mid360_plugin_lib=args.mid360_plugin_lib,
+        mid360_downsample=args.mid360_downsample,
+        mid360_gazebo_gui=args.mid360_gazebo_gui,
+        mid360_visualize=args.mid360_visualize,
         path_length=args.path_length,
         leash_length=args.leash_length,
         robot_speed=args.robot_speed,
