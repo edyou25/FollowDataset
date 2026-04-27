@@ -58,10 +58,14 @@ class Visualizer:
         # Camera offset (world coordinates)
         self.camera_offset = np.array([0.0, 0.0])
         self.camera_follow = True  # Follow robot
+        self.last_robot_position: Optional[np.ndarray] = None
+        self.is_dragging = False
+        self.drag_button = 1
+        self.drag_last_pos: Optional[tuple[int, int]] = None
         
         # pygame initialization
         pygame.init()
-        self.screen = pygame.display.set_mode((width, height))
+        self.screen = pygame.display.set_mode((width, height), pygame.RESIZABLE)
         pygame.display.set_caption("Guide Dog Robot - Data Collection")
         self.clock = pygame.time.Clock()
         self.font = pygame.font.Font(None, 28)
@@ -100,25 +104,101 @@ class Visualizer:
         screen_y = self.height / 2 - relative[1] * self.ppm
         
         return int(screen_x), int(screen_y)
+
+    def screen_to_world(self, screen_pos: tuple[int, int]) -> np.ndarray:
+        """Convert screen coordinates to world coordinates."""
+        return np.array(
+            [
+                self.camera_offset[0] + (screen_pos[0] - self.width / 2) / self.ppm,
+                self.camera_offset[1] - (screen_pos[1] - self.height / 2) / self.ppm,
+            ],
+            dtype=np.float32,
+        )
     
     def update_camera(self, robot_position: np.ndarray):
         """Update camera position"""
+        self.last_robot_position = np.asarray(robot_position, dtype=np.float32).copy()
         if self.camera_follow:
             # Smooth follow robot
             self.camera_offset = self.camera_offset * 0.95 + robot_position * 0.05
+
+    def resize(self, width: int, height: int):
+        """Sync cached window size after the OS has resized the surface."""
+        self.width = max(640, int(width))
+        self.height = max(480, int(height))
+        surface = pygame.display.get_surface()
+        if surface is not None:
+            self.screen = surface
+
+    def _is_over_legend(self, pos: Optional[tuple[int, int]]) -> bool:
+        if pos is None:
+            return False
+        return any(rect.collidepoint(pos) for rect in self._legend_hitboxes.values())
     
     def handle_zoom(self, event: pygame.event.Event):
         """Handle mouse wheel zoom"""
         if event.type == pygame.MOUSEWHEEL:
+            old_ppm = self.ppm
             if event.y > 0:  # Scroll up - zoom in
                 self.ppm = min(self.ppm * self.ZOOM_STEP, self.MAX_PPM)
             elif event.y < 0:  # Scroll down - zoom out
                 self.ppm = max(self.ppm / self.ZOOM_STEP, self.MIN_PPM)
+            if abs(self.ppm - old_ppm) > 1e-6:
+                self.camera_follow = True
+                if self.last_robot_position is not None:
+                    self.camera_offset = self.last_robot_position.copy()
+
+    def _handle_drag(self, event: pygame.event.Event):
+        if event.type == pygame.MOUSEBUTTONDOWN and getattr(event, "button", None) == self.drag_button:
+            pos = getattr(event, "pos", None)
+            if self._is_over_legend(pos):
+                return
+            self.is_dragging = True
+            self.drag_last_pos = pos
+            self.camera_follow = False
+            return
+
+        if event.type == pygame.MOUSEMOTION and self.is_dragging and self.drag_last_pos is not None:
+            pos = getattr(event, "pos", None)
+            if pos is None:
+                return
+            dx = pos[0] - self.drag_last_pos[0]
+            dy = pos[1] - self.drag_last_pos[1]
+            self.camera_offset -= np.array([dx / self.ppm, -dy / self.ppm], dtype=np.float32)
+            self.drag_last_pos = pos
+            return
+
+        if event.type == pygame.MOUSEBUTTONUP and getattr(event, "button", None) == self.drag_button:
+            self.is_dragging = False
+            self.drag_last_pos = None
+            return
+
+        if event.type == pygame.WINDOWLEAVE:
+            self.is_dragging = False
+            self.drag_last_pos = None
+
+    def _handle_resize(self, event: pygame.event.Event):
+        if event.type == pygame.VIDEORESIZE:
+            self.resize(event.w, event.h)
+            return
+
+        window_resized = getattr(pygame, "WINDOWRESIZED", None)
+        if window_resized is not None and event.type == window_resized:
+            self.resize(event.x, event.y)
+            return
+
+        window_size_changed = getattr(pygame, "WINDOWSIZECHANGED", None)
+        if window_size_changed is not None and event.type == window_size_changed:
+            self.resize(event.x, event.y)
 
     def handle_event(self, event: pygame.event.Event):
-        """Handle mouse events (zoom + legend toggles)."""
+        """Handle interaction events for view control and legend toggles."""
+        self._handle_resize(event)
         self.handle_zoom(event)
+        self._handle_drag(event)
         self._handle_legend_event(event)
+        if event.type == pygame.KEYDOWN and event.key == pygame.K_f:
+            self.camera_follow = not self.camera_follow
 
     def _legend_items(self) -> list[dict]:
         return [
@@ -236,7 +316,7 @@ class Visualizer:
             end = self.world_to_screen(np.array([100, y]))
             pygame.draw.line(self.screen, self.COLORS['grid'], start, end, 1)
     
-    def draw_path(self, path: np.ndarray, color: tuple, width: int = 2):
+    def draw_path(self, path: np.ndarray, color: tuple, width: int = 5):
         """Draw path"""
         if len(path) < 2:
             return
@@ -302,15 +382,15 @@ class Visualizer:
                 r = float(obs[2])
             screen_pos = self.world_to_screen(np.array([x, y]))
             radius_px = max(2, int(r * self.ppm))
-            pygame.draw.circle(self.screen, self.COLORS['obstacle'], screen_pos, radius_px)
-            pygame.draw.circle(self.screen, (200, 200, 220), screen_pos, radius_px, 1)
+            pygame.draw.circle(self.screen, self.COLORS['obstacle'], screen_pos, radius_px, 10)
+            pygame.draw.circle(self.screen, (200, 200, 220), screen_pos, radius_px, 10)
             if inflate_values:
                 for idx, value in enumerate(inflate_values):
                     if value <= 0:
                         continue
                     inflated_px = max(2, int((r + value) * self.ppm))
                     color = inflate_colors[min(idx, len(inflate_colors) - 1)]
-                    pygame.draw.circle(self.screen, color, screen_pos, inflated_px, 3)
+                    pygame.draw.circle(self.screen, color, screen_pos, inflated_px, 10)
 
     def draw_segments(self, segments: Optional[np.ndarray], inflation: Optional[tuple] = None, width: int = 3):
         """Draw line segment obstacles defined as (x1, y1, x2, y2)."""
@@ -356,14 +436,14 @@ class Visualizer:
                     color,
                     self.world_to_screen(p1 + offset),
                     self.world_to_screen(p2 + offset),
-                    3,
+                    10,
                 )
                 pygame.draw.line(
                     self.screen,
                     color,
                     self.world_to_screen(p1 - offset),
                     self.world_to_screen(p2 - offset),
-                    3,
+                    10,
                 )
 
     def draw_observation_obstacles(
@@ -676,7 +756,9 @@ class Visualizer:
                 "S: Save",
                 "R: Reset",
                 "N: New Path",
+                "Drag: Pan View",
                 "Scroll: Zoom",
+                "F: Toggle Follow",
                 "ESC: Exit",
             ]
         y = self.height - len(controls) * line_height - 10
@@ -771,6 +853,13 @@ class Visualizer:
         flip: bool = True
     ):
         """Render one frame. Set flip=False to manually control display update."""
+        surface = pygame.display.get_surface()
+        if surface is not None and surface != self.screen:
+            self.screen = surface
+        current_size = self.screen.get_size()
+        if current_size != (self.width, self.height):
+            self.width, self.height = current_size
+
         # Update camera
         self.update_camera(robot_pos)
         

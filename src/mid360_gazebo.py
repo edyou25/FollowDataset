@@ -3,6 +3,7 @@ Gazebo/ROS Mid-360 simulation bridge.
 """
 from __future__ import annotations
 
+import copy
 import importlib
 import math
 import os
@@ -188,10 +189,13 @@ class Mid360GazeboSession:
         self.delete_model_srv = None
         self.set_model_state_srv = None
         self.static_tf_broadcaster = None
+        self.rviz_tf_broadcaster = None
+        self.rviz_pointcloud_pub = None
 
         self._cloud_lock = threading.Lock()
         self._latest_cloud: Optional[dict[str, Any]] = None
         self._cloud_seq = 0
+        self._latest_robot_heading = 0.0
         self._camera_target_xy = np.zeros(2, dtype=np.float64)
         self._camera_thread: Optional[threading.Thread] = None
         self._camera_stop_event = threading.Event()
@@ -199,6 +203,9 @@ class Mid360GazeboSession:
         self.robot_model_name = "followdataset_mid360_robot"
         self.human_model_name = "followdataset_human"
         self.leash_model_name = "followdataset_leash"
+        self.rviz_base_frame = "base_link_rviz"
+        self.rviz_mid360_frame = "mid360_link_rviz"
+        self.rviz_pointcloud_topic = f"{self.config.ros_topic}_rviz"
 
     def start(self):
         if self.started:
@@ -302,7 +309,9 @@ class Mid360GazeboSession:
         return {
             "backend": "mid360_gazebo",
             "mid360_topic": self.config.ros_topic,
+            "mid360_rviz_topic": self.rviz_pointcloud_topic,
             "mid360_frame": self.config.frame_name,
+            "mid360_rviz_frame": self.rviz_mid360_frame,
             "mid360_mount_matrix": T_BASE_MID360.tolist(),
             "mid360_mount_pose_xyz": MID360_MOUNT_XYZ.tolist(),
             "mid360_mount_pose_rpy": MID360_MOUNT_RPY.tolist(),
@@ -320,6 +329,7 @@ class Mid360GazeboSession:
     def update_entities(self, robot_state: Any, human_state: Any):
         if not self.started:
             return
+        self._latest_robot_heading = float(robot_state.heading)
         self._set_model_state(
             self.robot_model_name,
             x=float(robot_state.position[0]),
@@ -507,6 +517,11 @@ class Mid360GazeboSession:
                 disable_signals=True,
             )
         self.rospy.Subscriber(self.config.ros_topic, self.pointcloud_msg_type, self._pointcloud_callback)
+        self.rviz_pointcloud_pub = self.rospy.Publisher(
+            self.rviz_pointcloud_topic,
+            self.pointcloud_msg_type,
+            queue_size=2,
+        )
 
     def _launch_gazebo(self):
         plugin_library = self.config.resolved_plugin_library()
@@ -554,12 +569,46 @@ class Mid360GazeboSession:
             [float(rpy[0]), float(rpy[1]), float(rpy[2])],
             degrees=False,
         ).as_quat()
+        quat = Rotation.from_euler(
+            "xyz",
+            [float(rpy[0]), float(rpy[1]), float(0)],
+            degrees=False,
+        ).as_quat()
         transform.transform.rotation.x = float(quat[0])
         transform.transform.rotation.y = float(quat[1])
         transform.transform.rotation.z = float(quat[2])
         transform.transform.rotation.w = float(quat[3])
+        rviz_transform = self.geometry_msgs.TransformStamped()
+        rviz_transform.header.stamp = transform.header.stamp
+        rviz_transform.header.frame_id = self.rviz_base_frame
+        rviz_transform.child_frame_id = self.rviz_mid360_frame
+        rviz_transform.transform.translation.x = float(xyz[0])
+        rviz_transform.transform.translation.y = float(xyz[1])
+        rviz_transform.transform.translation.z = float(xyz[2])
+        rviz_transform.transform.rotation.x = float(quat[0])
+        rviz_transform.transform.rotation.y = float(quat[1])
+        rviz_transform.transform.rotation.z = float(quat[2])
+        rviz_transform.transform.rotation.w = float(quat[3])
         self.static_tf_broadcaster = self.tf2_ros.StaticTransformBroadcaster()
-        self.static_tf_broadcaster.sendTransform(transform)
+        self.static_tf_broadcaster.sendTransform([transform, rviz_transform])
+        self.rviz_tf_broadcaster = self.tf2_ros.TransformBroadcaster()
+
+    def _publish_rviz_base_tf(self, stamp, heading: float):
+        if self.rviz_tf_broadcaster is None or self.geometry_msgs is None:
+            return
+        transform = self.geometry_msgs.TransformStamped()
+        transform.header.stamp = stamp
+        transform.header.frame_id = self.rviz_base_frame
+        transform.child_frame_id = "base_link"
+        transform.transform.translation.x = 0.0
+        transform.transform.translation.y = 0.0
+        transform.transform.translation.z = 0.0
+        quat = Rotation.from_euler("z", float(heading), degrees=False).as_quat()
+        transform.transform.rotation.x = float(quat[0])
+        transform.transform.rotation.y = float(quat[1])
+        transform.transform.rotation.z = float(quat[2])
+        transform.transform.rotation.w = float(quat[3])
+        self.rviz_tf_broadcaster.sendTransform(transform)
 
     def _launch_rviz(self):
         rviz_config = _repo_root() / "rviz" / "mid360.rviz"
@@ -736,6 +785,45 @@ class Mid360GazeboSession:
                 points = points.reshape(1, -1)
         else:
             points = np.zeros((0, len(field_names)), dtype=np.float32)
+
+        if hasattr(msg, "header") and hasattr(msg.header, "stamp"):
+            self._publish_rviz_base_tf(msg.header.stamp, self._latest_robot_heading)
+        if self.rviz_pointcloud_pub is not None:
+            if len(points) == 0:
+                rviz_msg = copy.deepcopy(msg)
+                rviz_msg.header.frame_id = self.rviz_base_frame
+                self.rviz_pointcloud_pub.publish(rviz_msg)
+            else:
+                x_idx = field_names.index("x") if "x" in field_names else -1
+                y_idx = field_names.index("y") if "y" in field_names else -1
+                z_idx = field_names.index("z") if "z" in field_names else -1
+                heading = float(self._latest_robot_heading)
+                rviz_header = copy.deepcopy(msg.header)
+                rviz_header.frame_id = self.rviz_base_frame
+                if x_idx < 0 or y_idx < 0 or z_idx < 0:
+                    rviz_msg = copy.deepcopy(msg)
+                    rviz_msg.header = rviz_header
+                else:
+                    heading_rot = Rotation.from_euler("z", heading, degrees=False).as_matrix()
+                    mount_rot = T_BASE_MID360[:3, :3]
+                    mount_trans = T_BASE_MID360[:3, 3]
+                    rviz_rot = heading_rot @ mount_rot
+                    rviz_trans = heading_rot @ mount_trans
+                    xyz = points[:, [x_idx, y_idx, z_idx]]
+                    rviz_xyz = xyz @ rviz_rot.T + rviz_trans.astype(np.float32)
+                    rviz_rows: list[tuple[Any, ...]] = []
+                    for i, row in enumerate(rows):
+                        row_values = list(row)
+                        row_values[x_idx] = float(rviz_xyz[i, 0])
+                        row_values[y_idx] = float(rviz_xyz[i, 1])
+                        row_values[z_idx] = float(rviz_xyz[i, 2])
+                        rviz_rows.append(tuple(row_values))
+                    rviz_msg = self.point_cloud2.create_cloud(
+                        rviz_header,
+                        msg.fields,
+                        rviz_rows,
+                    )
+                self.rviz_pointcloud_pub.publish(rviz_msg)
 
         stamp = 0.0
         if hasattr(msg.header, "stamp") and hasattr(msg.header.stamp, "to_sec"):

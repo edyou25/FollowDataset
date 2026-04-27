@@ -4,9 +4,12 @@ Panels:
     Name: Displays
     Property Tree Widget:
       Expanded:
+        - /Global Options1
+        - /Status1
         - /PointCloud21
+        - /Mid360 Axes1
       Splitter Ratio: 0.5
-    Tree Height: 610
+    Tree Height: 1037
   - Class: rviz/Views
     Expanded:
       - /Current View1
@@ -39,7 +42,7 @@ Visualization Manager:
         Z: 0
       Plane: XY
       Plane Cell Count: 60
-      Reference Frame: base_link
+      Reference Frame: base_link_rviz
       Value: true
     - Class: rviz/TF
       Enabled: true
@@ -50,7 +53,11 @@ Visualization Manager:
         All Enabled: true
         base_link:
           Value: true
+        base_link_rviz:
+          Value: true
         mid360_link:
+          Value: true
+        mid360_link_rviz:
           Value: true
       Marker Alpha: 1
       Marker Scale: 0.5
@@ -59,8 +66,11 @@ Visualization Manager:
       Show Axes: true
       Show Names: true
       Tree:
-        base_link:
-          mid360_link:
+        base_link_rviz:
+          base_link:
+            mid360_link:
+              {}
+          mid360_link_rviz:
             {}
       Update Interval: 0
       Value: true
@@ -87,7 +97,7 @@ Visualization Manager:
       Size (Pixels): 3
       Size (m): 0.029999999329447746
       Style: Flat Squares
-      Topic: /livox/lidar
+      Topic: /livox/lidar_rviz
       Unreliable: false
       Use Fixed Frame: true
       Use rainbow: true
@@ -98,14 +108,14 @@ Visualization Manager:
       Length: 0.4000000059604645
       Name: Mid360 Axes
       Radius: 0.029999999329447746
-      Reference Frame: base_link
+      Reference Frame: base_link_rviz
       Show Trail: false
       Value: true
   Enabled: true
   Global Options:
     Background Color: 28; 30; 34
     Default Light: true
-    Fixed Frame: base_link
+    Fixed Frame: base_link_rviz
     Frame Rate: 30
   Name: root
   Tools:
@@ -128,8 +138,8 @@ Visualization Manager:
   Value: true
   Views:
     Current:
-      Class: rviz/ThirdPersonFollower
-      Distance: 11.313905715942383
+      Class: rviz/Orbit
+      Distance: 17.754493713378906
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
@@ -137,29 +147,29 @@ Visualization Manager:
         Value: false
       Field of View: 0.7853981852531433
       Focal Point:
-        X: 6.673323631286621
-        Y: -1.8902807235717773
-        Z: 0
+        X: 6.883090496063232
+        Y: 1.3763066530227661
+        Z: 0.1986040323972702
       Focal Shape Fixed Size: true
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 1.5697963237762451
-      Target Frame: base_link
-      Yaw: 4.7431840896606445
+      Pitch: 1.5647963285446167
+      Target Frame: base_link_rviz
+      Yaw: 4.693187236785889
     Saved: ~
 Window Geometry:
   Displays:
-    collapsed: false
-  Height: 923
-  Hide Left Dock: false
+    collapsed: true
+  Height: 1350
+  Hide Left Dock: true
   Hide Right Dock: false
-  QMainWindow State: 000000ff00000000fd0000000100000000000001dc00000350fc0200000003fb000000100044006900730070006c0061007900730000000022000003500000017800fffffffb0000000a0056006900650077007300000003b8000001230000012300fffffffb0000000800540069006d0065000000031c000000560000005600ffffff000006480000035000000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730000000000ffffffff0000000000000000
+  QMainWindow State: 000000ff00000000fd0000000100000000000001dc000004fbfc0200000003fb000000100044006900730070006c0061007900730000000022000004fb0000017800fffffffb0000000a0056006900650077007300000003b8000001230000012300fffffffb0000000800540069006d0065000000031c000000560000005600ffffff00000635000004fb00000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730000000000ffffffff0000000000000000
   Time:
     collapsed: false
   Views:
     collapsed: false
-  Width: 1608
-  X: 3454
-  Y: 1536
+  Width: 1589
+  X: 3443
+  Y: 1343
