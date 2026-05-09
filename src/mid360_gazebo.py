@@ -39,6 +39,8 @@ def transform_matrix_to_xyz_rpy(transform: np.ndarray) -> tuple[np.ndarray, np.n
 
 
 MID360_MOUNT_XYZ, MID360_MOUNT_RPY = transform_matrix_to_xyz_rpy(T_BASE_MID360)
+MID360_VISUAL_XYZ = np.array([0.205, 0.0, -0.040], dtype=np.float64)
+MID360_VISUAL_RPY = np.array([0.0, 3.0 * np.pi / 4.0, 0.0], dtype=np.float64)
 
 
 def _repo_root() -> Path:
@@ -163,6 +165,8 @@ class Mid360GazeboSession:
 
         self.world_path = self.runtime_dir / "world.sdf"
         self.robot_model_path = self.runtime_dir / "robot.urdf"
+        self.repo_robot_urdf_path = _repo_root() / "urdf" / "followdataset_mid360_robot.urdf"
+        self.repo_full_robot_urdf_path = _repo_root() / "urdf" / "followdataset_full_robot.urdf"
         self.human_model_path = self.runtime_dir / "human.sdf"
         self.leash_model_path = self.runtime_dir / "leash.sdf"
         self.roscore_log_path = self.runtime_dir / "roscore.log"
@@ -320,6 +324,8 @@ class Mid360GazeboSession:
             "runtime_dir": str(self.runtime_dir),
             "world_sdf": str(self.world_path),
             "robot_urdf": str(self.robot_model_path),
+            "robot_urdf_repo_copy": str(self.repo_robot_urdf_path),
+            "robot_urdf_full_repo_copy": str(self.repo_full_robot_urdf_path),
             "human_sdf": str(self.human_model_path),
             "leash_sdf": str(self.leash_model_path),
             "rviz_config": str(_repo_root() / "rviz" / "mid360.rviz"),
@@ -420,8 +426,13 @@ class Mid360GazeboSession:
             time.sleep(0.01)
 
     def _write_runtime_files(self):
-        self.world_path.write_text(self._generate_world_sdf(), encoding="utf-8")
-        self.robot_model_path.write_text(self._generate_robot_urdf(), encoding="utf-8")
+        world_sdf = self._generate_world_sdf()
+        robot_urdf = self._generate_robot_urdf()
+        self.world_path.write_text(world_sdf, encoding="utf-8")
+        self.robot_model_path.write_text(robot_urdf, encoding="utf-8")
+        self.repo_robot_urdf_path.parent.mkdir(parents=True, exist_ok=True)
+        self.repo_robot_urdf_path.write_text(robot_urdf, encoding="utf-8")
+        self.repo_full_robot_urdf_path.write_text(robot_urdf, encoding="utf-8")
         self.human_model_path.write_text(self._generate_human_sdf(), encoding="utf-8")
         self.leash_model_path.write_text(self._generate_leash_sdf(), encoding="utf-8")
 
@@ -921,23 +932,6 @@ class Mid360GazeboSession:
 """
 
     def _generate_robot_urdf(self) -> str:
-        mesh_path = (
-            self.config.plugin_dir
-            / "livox_laser_simulation"
-            / "meshes"
-            / "livox_mid-360-90x.dae"
-        )
-        mesh_visual_xml = ""
-        if mesh_path.exists():
-            mesh_visual_xml = f"""
-    <visual>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry>
-        <mesh filename="file://{mesh_path}" scale="1 1 1"/>
-      </geometry>
-    </visual>
-"""
-
         return f"""<?xml version="1.0"?>
 <robot name="followdataset_mid360_robot">
   <material name="base_blue">
@@ -951,6 +945,15 @@ class Mid360GazeboSession:
   </material>
   <material name="mid360_purple">
     <color rgba="0.45 0.35 0.75 0.0"/>
+  </material>
+  <material name="mid360_shell">
+    <color rgba="0.16 0.19 0.24 1.0"/>
+  </material>
+  <material name="mid360_glass">
+    <color rgba="0.52 0.70 0.88 0.92"/>
+  </material>
+  <material name="mid360_mount">
+    <color rgba="0.28 0.30 0.34 1.0"/>
   </material>
 
   <link name="base_footprint"/>
@@ -1143,14 +1146,48 @@ class Mid360GazeboSession:
       <mass value="0.30"/>
       <inertia ixx="3e-4" ixy="0.0" ixz="0.0" iyy="3e-4" iyz="0.0" izz="3e-4"/>
     </inertial>
+  </link>
+
+  <joint name="mid360_visual_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="mid360_visual_link"/>
+    <origin xyz="{MID360_VISUAL_XYZ[0]} {MID360_VISUAL_XYZ[1]} {MID360_VISUAL_XYZ[2]}" rpy="{MID360_VISUAL_RPY[0]} {MID360_VISUAL_RPY[1]} {MID360_VISUAL_RPY[2]}"/>
+  </joint>
+  <link name="mid360_visual_link">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <mass value="0.05"/>
+      <inertia ixx="1e-4" ixy="0.0" ixz="0.0" iyy="1e-4" iyz="0.0" izz="1e-4"/>
+    </inertial>
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
       <geometry>
-        <cylinder radius="0.05" length="0.07"/>
+        <sphere radius="0.052"/>
       </geometry>
-      <material name="mid360_purple"/>
+      <material name="mid360_shell"/>
     </visual>
-{mesh_visual_xml}  </link>
+    <visual>
+      <origin xyz="0 0 0.018" rpy="0 0 0"/>
+      <geometry>
+        <sphere radius="0.030"/>
+      </geometry>
+      <material name="mid360_glass"/>
+    </visual>
+    <visual>
+      <origin xyz="0 0 -0.030" rpy="0 0 0"/>
+      <geometry>
+        <cylinder radius="0.046" length="0.020"/>
+      </geometry>
+      <material name="mid360_shell"/>
+    </visual>
+    <visual>
+      <origin xyz="0 0 -0.044" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.080 0.080 0.018"/>
+      </geometry>
+      <material name="mid360_mount"/>
+    </visual>
+  </link>
 
   <gazebo reference="base_link">
     <material>Gazebo/Transparent</material>
