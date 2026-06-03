@@ -202,6 +202,7 @@ class ModelPlanner:
         corridor_width: float = 2.5,
         obstacle_radius: float = 0.3,
         leash_length: float = 1.5,
+        leash_stiffness: float = 10.0,
         robot_speed: float = 1.0,
         robot_radius: float = 0.3,
         human_radius: float = 0.3,
@@ -235,6 +236,7 @@ class ModelPlanner:
         self.fps = fps
         self.sim_dt = 1.0 / fps
         self.leash_length = leash_length
+        self.leash_stiffness = float(leash_stiffness)
 
         # Initialize modules
         self.path_generator = PathGenerator(
@@ -586,6 +588,7 @@ class ModelPlanner:
         self.data_dt = self.sim_dt * self.frame_stride
         self.physics = PhysicsEngine(
             leash_length=leash_length,
+            leash_stiffness=self.leash_stiffness,
             robot_speed=robot_speed,
             dt=self.sim_dt,
             robot_radius=robot_radius,
@@ -611,6 +614,7 @@ class ModelPlanner:
 
         self.robot_trajectory = []
         self.human_trajectory = []
+        self.leash_force_history = []
         self.planned_path = None
         self.nominal_planned_path = None
         self.safe_planned_path = None
@@ -708,6 +712,7 @@ class ModelPlanner:
                     "robot_speed": float(self.physics.robot_speed),
                     "turn_speed": float(self.physics.turn_speed),
                     "leash_length": float(self.leash_length),
+                    "leash_stiffness": float(self.leash_stiffness),
                     "corridor_width": float(self.path_generator.corridor_width),
                     "obstacle_radius": float(self.path_generator.obstacle_radius),
                     "robot_radius": float(self.physics.robot_radius),
@@ -795,6 +800,7 @@ class ModelPlanner:
         self._sync_mid360_gazebo_session()
         self.robot_trajectory = []
         self.human_trajectory = []
+        self.leash_force_history = []
         self.planned_path = None
         self.nominal_planned_path = None
         self.safe_planned_path = None
@@ -1045,6 +1051,7 @@ class ModelPlanner:
         if frame_idx % self.log_interval != 0:
             return
         scores = self.scorer.get_scores() if self.scorer else {}
+        leash_force_n, leash_force_vec = self.physics.get_leash_force()
         payload = {
             "event": "step",
             "frame": int(frame_idx),
@@ -1057,6 +1064,12 @@ class ModelPlanner:
             "robot_vel": [float(robot_state.velocity[0]), float(robot_state.velocity[1])],
             "human_pos": [float(human_state.position[0]), float(human_state.position[1])],
             "heading": float(robot_state.heading),
+            "leash_tension_ratio": float(self.physics.get_leash_tension()),
+            "leash_force_n": float(leash_force_n),
+            "leash_force_vec": [
+                float(leash_force_vec[0]),
+                float(leash_force_vec[1]),
+            ],
             "forward": float(forward),
             "turn": float(turn),
             "speed_scale": float(self.current_speed_scale),
@@ -2944,11 +2957,14 @@ class ModelPlanner:
 
         self.robot_trajectory.append(robot_state.position.copy())
         self.human_trajectory.append(human_state.position.copy())
+        leash_force_n, _leash_force_vec = self.physics.get_leash_force()
+        self.leash_force_history.append(float(leash_force_n))
 
         max_trail = 5000
         if len(self.robot_trajectory) > max_trail:
             self.robot_trajectory = self.robot_trajectory[-max_trail:]
             self.human_trajectory = self.human_trajectory[-max_trail:]
+            self.leash_force_history = self.leash_force_history[-max_trail:]
 
         if self.scorer:
             self.scorer.update(robot_state.position, human_state.position)
@@ -2959,7 +2975,7 @@ class ModelPlanner:
             )
             self.obs_history.append(obs)
             self.prev_robot_pos = robot_state.position.copy()
-        # self._log_step(self.frame_count, robot_state, human_state, action, delta, forward, turn)
+        self._log_step(self.frame_count, robot_state, human_state, action, delta, forward, turn)
         if is_data_step:
             self.data_step_idx += 1
         self.frame_count += 1
@@ -3021,6 +3037,9 @@ class ModelPlanner:
             "pointcloud_mode": self.pointcloud_mode,
             "robot_radius": self.physics.robot_radius,
             "human_radius": self.physics.human_radius,
+            "leash_tension_ratio": self.physics.get_leash_tension(),
+            "leash_force_n": self.physics.get_leash_force()[0],
+            "leash_force_history": self.leash_force_history[-240:],
             "controls": [
                 "P: Policy/Manual",
                 "C: PointCloud",
@@ -3179,6 +3198,12 @@ def main():
     )
     parser.add_argument("--path-length", type=float, default=50.0)
     parser.add_argument("--leash-length", type=float, default=1.5)
+    parser.add_argument(
+        "--leash-stiffness",
+        type=float,
+        default=10.0,
+        help="Equivalent leash stiffness in N/m for force estimation (default: 10.0).",
+    )
     parser.add_argument("--robot-speed", type=float, default=1.5)
     parser.add_argument("--fps", type=int, default=20)
     parser.add_argument("--inference-steps", type=int, default=64,
@@ -3298,6 +3323,7 @@ def main():
         mid360_visualize=args.mid360_visualize,
         path_length=args.path_length,
         leash_length=args.leash_length,
+        leash_stiffness=args.leash_stiffness,
         robot_speed=args.robot_speed,
         fps=args.fps,
         inference_steps=args.inference_steps,

@@ -731,11 +731,19 @@ class Visualizer:
         mode = info.get('mode')
         if mode:
             texts.append(f"Mode: {mode}")
+        if 'leash_force_n' in info:
+            texts.append(f"Leash Force: {info.get('leash_force_n', 0.0):.2f} N")
+        if 'leash_tension_ratio' in info:
+            texts.append(f"Leash Tension: {info.get('leash_tension_ratio', 0.0):.2f}")
         
         for text in texts:
             surface = self.font.render(text, True, self.COLORS['text'])
             self.screen.blit(surface, (15, y))
             y += line_height
+
+        force_history = info.get('leash_force_history')
+        if force_history:
+            self._draw_leash_force_plot(force_history)
         
         # Recording status
         if info.get('recording', False):
@@ -823,6 +831,42 @@ class Visualizer:
             self.screen.blit(label_surface, (panel_x + 15, y))
             self.screen.blit(value_surface, (panel_x + 110, y))
             y += line_height
+
+    def _draw_leash_force_plot(self, force_history):
+        """Draw a compact real-time leash force plot."""
+        values = np.asarray(force_history, dtype=np.float32)
+        if values.size < 2:
+            return
+
+        plot_w = 240
+        plot_h = 90
+        plot_x = self.width - plot_w - 15
+        plot_y = self.height - plot_h - 15
+        rect = pygame.Rect(plot_x, plot_y, plot_w, plot_h)
+        pygame.draw.rect(self.screen, (30, 30, 42), rect, border_radius=6)
+        pygame.draw.rect(self.screen, (65, 65, 85), rect, 1, border_radius=6)
+
+        max_force = max(1.0, float(np.max(values)))
+        label = self.font.render(f"Leash force max {max_force:.2f} N", True, self.COLORS['text'])
+        self.screen.blit(label, (plot_x + 8, plot_y + 6))
+
+        left = plot_x + 10
+        right = plot_x + plot_w - 10
+        top = plot_y + 28
+        bottom = plot_y + plot_h - 10
+        pygame.draw.line(self.screen, (75, 75, 95), (left, bottom), (right, bottom), 1)
+        pygame.draw.line(self.screen, (75, 75, 95), (left, top), (left, bottom), 1)
+
+        if values.size > plot_w - 20:
+            values = values[-(plot_w - 20):]
+        denom = max(1, values.size - 1)
+        points = []
+        for idx, value in enumerate(values):
+            x = left + int((right - left) * idx / denom)
+            y = bottom - int((bottom - top) * float(value) / max_force)
+            points.append((x, y))
+        if len(points) >= 2:
+            pygame.draw.lines(self.screen, (255, 120, 80), False, points, 2)
     
     def render(
         self,
