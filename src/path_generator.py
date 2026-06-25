@@ -14,7 +14,7 @@ class PathGenerator:
         self,
         target_length: float = 50.0,
         num_segments: int = 6,
-        corridor_width: float = 2.5,
+        corridor_width: float = 3.5,
         obstacle_radius: float = 0.3,
         obstacle_jitter: float = 0.4,
         wall_miter_limit: float = 4.0,
@@ -98,14 +98,15 @@ class PathGenerator:
 
                 # Turn for next segment (except last)
                 if i < self.num_segments - 1:
-                    turn_type = np.random.choice(['sharp', 'right_angle', 'slight'])
+                    # turn_type = np.random.choice(['sharp', 'right_angle', 'slight'])
+                    turn_type = np.random.choice(['slight', 'right_angle', 'slight'])
 
                     if turn_type == 'sharp':
                         # Sharp turn: 60-120 degrees
                         turn_angle = np.random.choice([-1, 1]) * np.random.uniform(np.pi/3, 2*np.pi/3)
                     elif turn_type == 'right_angle':
-                        # Right angle turn: ~90 degrees (like real tactile paving)
-                        turn_angle = np.random.choice([-1, 1]) * np.pi/2
+                        # Right angle turn: ~60 degrees (like real tactile paving)
+                        turn_angle = np.random.choice([-1, 1]) * np.pi/3
                         turn_angle += np.random.uniform(-0.1, 0.1)  # Small variation
                     else:
                         # Slight turn: 15-45 degrees

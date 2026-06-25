@@ -731,12 +731,23 @@ class Visualizer:
         mode = info.get('mode')
         if mode:
             texts.append(f"Mode: {mode}")
+        interaction_label = info.get('interaction_label')
+        if interaction_label:
+            texts.append(f"Interaction: {interaction_label}")
+        if 'compliance_steps' in info and 'compliance_total_steps' in info:
+            texts.append(
+                f"Compliance Steps: {int(info.get('compliance_steps', 0))}/"
+                f"{int(info.get('compliance_total_steps', 0))}"
+            )
+        nominal_heading_delta = info.get('nominal_heading_delta')
+        if nominal_heading_delta is not None:
+            texts.append(f"Nominal Final Heading Delta: {float(nominal_heading_delta):.4f} rad")
         
         for text in texts:
             surface = self.font.render(text, True, self.COLORS['text'])
             self.screen.blit(surface, (15, y))
             y += line_height
-        
+
         # Recording status
         if info.get('recording', False):
             rec_text = self.font_large.render("● REC", True, self.COLORS['recording'])
@@ -766,7 +777,7 @@ class Visualizer:
             surface = self.font.render(text, True, (150, 150, 150))
             self.screen.blit(surface, (15, y))
             y += line_height
-    
+
     def _draw_score_panel(self, scores: dict):
         """Draw score panel on the right side"""
         panel_width = 180

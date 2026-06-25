@@ -279,7 +279,7 @@
     <sensor type="ray" name="mid360_sensor">
       <always_on>true</always_on>
       <visualize>false</visualize>
-      <update_rate>20.0</update_rate>
+      <update_rate>10.0</update_rate>
       <pose>0 0 0 0 0 0</pose>
       <plugin name="gazebo_ros_laser_controller" filename="liblivox_laser_simulation.so">
         <ray>
@@ -310,7 +310,7 @@
         </ray>
         <visualize>False</visualize>
         <samples>20000</samples>
-        <downsample>1</downsample>
+        <downsample>2</downsample>
         <csv_file_name>mid360-real-centr.csv</csv_file_name>
         <publish_pointcloud_type>2</publish_pointcloud_type>
         <ros_topic>/livox/lidar</ros_topic>

@@ -39,6 +39,7 @@ class Mid360DataStorage(DataStorage):
         robot_pos: np.ndarray,
         human_pos: np.ndarray,
         timestamp: Optional[float] = None,
+        state: int = 2,
         *,
         robot_base_pose: Optional[np.ndarray] = None,
         human_base_pose: Optional[np.ndarray] = None,
@@ -47,7 +48,12 @@ class Mid360DataStorage(DataStorage):
         point_cloud_timestamp: Optional[float] = None,
         point_cloud_fields: Optional[list[str]] = None,
     ):
-        super().record_frame(robot_pos=robot_pos, human_pos=human_pos, timestamp=timestamp)
+        super().record_frame(
+            robot_pos=robot_pos,
+            human_pos=human_pos,
+            timestamp=timestamp,
+            state=state,
+        )
 
         self.robot_base_poses.append(
             np.asarray(robot_base_pose, dtype=np.float64).copy()
@@ -97,6 +103,7 @@ class Mid360DataStorage(DataStorage):
         robot_arr = np.asarray(self.robot_trajectory, dtype=np.float64)
         human_arr = np.asarray(self.human_trajectory, dtype=np.float64)
         time_arr = np.asarray(self.timestamps, dtype=np.float64)
+        state_arr = np.asarray(self.states, dtype=np.int8)
 
         store = zarr.DirectoryStore(path)
         root = zarr.group(store=store, overwrite=True)
@@ -118,6 +125,12 @@ class Mid360DataStorage(DataStorage):
             data=time_arr,
             chunks=(min(max(len(time_arr), 1), 1000),),
             dtype="float64",
+        )
+        root.create_dataset(
+            "state",
+            data=state_arr,
+            chunks=(min(max(len(state_arr), 1), 1000),),
+            dtype="int8",
         )
 
         if self.robot_base_poses:

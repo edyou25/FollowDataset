@@ -1,0 +1,1270 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="en" xml:lang="en"><head>
+
+<meta charset="utf-8">
+<meta name="generator" content="quarto-1.9.36">
+
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+
+
+<title>My Quarto Note</title>
+<style>
+/* Default styles provided by pandoc.
+** See https://pandoc.org/MANUAL.html#variables-for-html for config info.
+*/
+code{white-space: pre-wrap;}
+span.smallcaps{font-variant: small-caps;}
+div.columns{display: flex; gap: min(4vw, 1.5em);}
+div.column{flex: auto; overflow-x: auto;}
+div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+ul.task-list{list-style: none;}
+ul.task-list li input[type="checkbox"] {
+  width: 0.8em;
+  margin: 0 0.8em 0.2em -1em; /* quarto-specific, see https://github.com/quarto-dev/quarto-cli/issues/4556 */ 
+  vertical-align: middle;
+}
+</style>
+
+
+<script src="paper_files/libs/clipboard/clipboard.min.js"></script>
+<script src="paper_files/libs/quarto-html/quarto.js" type="module"></script>
+<script src="paper_files/libs/quarto-html/tabsets/tabsets.js" type="module"></script>
+<script src="paper_files/libs/quarto-html/popper.min.js"></script>
+<script src="paper_files/libs/quarto-html/tippy.umd.min.js"></script>
+<script src="paper_files/libs/quarto-html/anchor.min.js"></script>
+<link href="paper_files/libs/quarto-html/tippy.css" rel="stylesheet">
+<link href="paper_files/libs/quarto-html/quarto-syntax-highlighting-845c23b38eaddc0f92fda52bfe77a8c8.css" rel="stylesheet" id="quarto-text-highlighting-styles">
+<script src="paper_files/libs/bootstrap/bootstrap.min.js"></script>
+<link href="paper_files/libs/bootstrap/bootstrap-icons.css" rel="stylesheet">
+<link href="paper_files/libs/bootstrap/bootstrap-7aad2e49db55f2d5005974a5ce10aae3.min.css" rel="stylesheet" append-hash="true" id="quarto-bootstrap" data-mode="light">
+
+  <script src="https://cdnjs.cloudflare.com/polyfill/v3/polyfill.min.js?features=es6"></script>
+  <script defer="" src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml-full.js" type="text/javascript"></script>
+
+<script type="text/javascript">
+const typesetMath = (el) => {
+  if (window.MathJax) {
+    // MathJax Typeset
+    window.MathJax.typeset([el]);
+  } else if (window.katex) {
+    // KaTeX Render
+    var mathElements = el.getElementsByClassName("math");
+    var macros = [];
+    for (var i = 0; i < mathElements.length; i++) {
+      var texText = mathElements[i].firstChild;
+      if (mathElements[i].tagName == "SPAN" && texText && texText.data) {
+        window.katex.render(texText.data, mathElements[i], {
+          displayMode: mathElements[i].classList.contains('display'),
+          throwOnError: false,
+          macros: macros,
+          fleqn: false
+        });
+      }
+    }
+  }
+}
+window.Quarto = {
+  typesetMath
+};
+</script>
+
+<link rel="stylesheet" href="styles.css">
+</head>
+
+<body class="fullcontent quarto-light">
+
+<div id="quarto-content" class="page-columns page-rows-contents page-layout-article">
+
+<main class="content" id="quarto-document-content">
+
+<header id="title-block-header" class="quarto-title-block default">
+<div class="quarto-title">
+<h1 class="title">My Quarto Note</h1>
+</div>
+
+
+
+<div class="quarto-title-meta">
+
+    
+  
+    
+  </div>
+  
+
+
+</header>
+
+
+<section id="human-safe-diffusion-planning-and-interaction-aware-compliance-control-for-guide-robots" class="level1">
+<h1>Human-Safe Diffusion Planning and Interaction-Aware Compliance Control for Guide Robots</h1>
+<section id="abstract" class="level2">
+<h2 class="anchored" data-anchor-id="abstract">Abstract</h2>
+<p>导盲机器人需要在复杂环境中安全地引导人类到达目标位置。与普通移动机器人导航不同，导盲机器人不仅需要避免机器人自身碰撞，还需要显式考虑<strong>被引导人的身体安全</strong>、<strong>运动舒适性</strong>以及人机物理交互中的<strong>主动性变化</strong>。现有 diffusion policy 可以从示范数据中学习平滑的运动策略，SafeDiffuser 类方法也可以通过 QP 或 safety projection 对动作进行安全修正。然而，现有方法通常主要关注机器人自身安全，缺少对人体碰撞风险的显式建模。</p>
+<p>此外，传统 delay harness model 通常假设机器人先执行动作，然后人类根据牵引方向和绳长约束被动随动。这种模型适合描述简单的被动跟随场景，但无法表达真实交互中人类主动避障、迟疑、抵抗或短时主导运动的情况。为此，本文提出一种面向导盲机器人的 human-safe diffusion planning and interaction-aware compliance control 框架。该方法首先在 SafeDiffuser 风格的 QP projection 中加入 <strong>human collision constraint</strong>，使规划器同时考虑机器人安全和人体安全。其次，本文在 delay harness model 基础上<strong>引入 active human motion model，并估计人类主动性系数</strong>。进一步，本文使用 HMM 根据轨迹和交互特征识别当前状态是 robot-leading、human-leading 还是 uncertain。最后，本文提出 <strong>interaction-aware compliance control</strong>，仅在 HMM 识别为 human-leading 时启用 compliance control，从而在顺应人类意图的同时避免全程顺应导致的效率下降。仿真和真实实验验证了本文方法在人体安全、交互适应性和任务效率方面的优势。</p>
+</section>
+<section id="keywards" class="level2">
+<h2 class="anchored" data-anchor-id="keywards">Keywards</h2>
+<p>guide robot，diffusion policy，safe planning，human-robot interaction，compliance control，human motion modeling，hidden Markov model。</p>
+<hr>
+</section>
+</section>
+<section id="i.-introduction" class="level1">
+<h1>I. Introduction</h1>
+<section id="a.-background-and-motivation" class="level2">
+<h2 class="anchored" data-anchor-id="a.-background-and-motivation">A. Background and Motivation</h2>
+<p>导盲机器人需要通过物理牵引、空间引导或共享控制的方式帮助人类完成导航任务。在 leash-based 或 harness-based guide robot 系统中，机器人与人之间存在物理耦合关系，因此机器人的动作会直接影响人的运动。</p>
+<p>与普通移动机器人不同，导盲机器人需要同时考虑以下因素：</p>
+<ul>
+<li>机器人自身安全；</li>
+<li>被引导人的身体安全；</li>
+<li>人机牵引约束；</li>
+<li>人类运动舒适性；</li>
+<li>人类主动意图；</li>
+<li>导航任务效率。</li>
+</ul>
+<p>一个对机器人安全的轨迹不一定对人安全。例如，机器人绕过障碍物时自身可能不会发生碰撞，但由于人类存在运动滞后、身体宽度、侧向偏移或绳索牵引方向变化，人可能被拉向障碍物。因此，导盲机器人规划不能只考虑 robot collision，还应显式考虑 human collision。</p>
+<p>同时，被引导人并不总是完全被动的。人在真实交互中可能会主动避障、减速、停顿、抵抗机器人牵引，或者短时间内主导运动方向。因此，导盲机器人控制应被建模为一个动态人机交互问题，而不是简单的机器人路径跟踪问题。</p>
+</section>
+<section id="b.-limitations-of-existing-methods" class="level2">
+<h2 class="anchored" data-anchor-id="b.-limitations-of-existing-methods">B. Limitations of Existing Methods</h2>
+<p>现有方法主要存在以下不足。</p>
+<p>第一，diffusion policy 能够从示范数据中学习平滑、复杂的动作分布，但原始 diffusion policy 缺少显式安全约束，无法保证生成动作一定满足安全要求。</p>
+<p>第二，SafeDiffuser 类方法通过 safety projection 或 QP-based correction 对 diffusion action 进行修正，但大多主要关注机器人自身与障碍物之间的安全距离，<strong>较少显式建模被引导人的身体碰撞风险</strong>。</p>
+<p>第三，delay harness model 通常假设机器人先运动，人类随后根据牵引约束被动更新位置。这种模型适合描述人被机器人带动的情况，但无法表达<strong>真实人类的主动运动</strong>。</p>
+<p>第四，compliance control 可以提高人机交互舒适性，使机器人顺应人类意图。然而，如果全程启用 <strong>compliance control，机器人可能过度让步，导致路径变长、速度下降和任务效率降低。</strong></p>
+</section>
+<section id="c.-contributions" class="level2">
+<h2 class="anchored" data-anchor-id="c.-contributions">C. Contributions</h2>
+<p>本文主要贡献如下。</p>
+<ol type="1">
+<li><p><strong>Human-safe diffusion planning.</strong> 本文在 SafeDiffuser-style constrained diffusion planning 中加入 human collision constraint，并通过 QP-based action projection 同时保证机器人安全和人体安全。</p></li>
+<li><p><strong>Active-passive interaction modeling.</strong> 本文在 delay harness model 基础上引入 stochastic human active motion，将人的运动表示为主动运动和被动随动运动的加权组合，并估计 human activeness coefficient。</p></li>
+<li><p><strong>HMM-based interaction state recognition.</strong> 本文使用 hidden Markov model 根据时间序列交互特征识别当前状态，包括 robot-leading、human-leading 和 uncertain。</p></li>
+<li><p><strong>Interaction-aware compliance control.</strong> 本文提出 HMM-triggered compliance controller，仅在 human-leading 状态下启用 compliance control，从而避免 full-time compliance 带来的效率下降。</p></li>
+</ol>
+</section>
+<section id="d.-paper-organization" class="level2">
+<h2 class="anchored" data-anchor-id="d.-paper-organization">D. Paper Organization</h2>
+<p>本文其余部分组织如下。Section II 回顾相关工作。Section III 给出问题定义。Section IV 介绍本文方法。Section V 介绍仿真实验。Section VI 介绍真实机器人实验。Section VII 讨论方法优势与局限。Section VIII 总结全文。</p>
+<hr>
+</section>
+</section>
+<section id="ii.-related-work" class="level1">
+<h1>II. Related Work</h1>
+<section id="a.-guide-robots-and-physical-human-robot-interaction" class="level2">
+<h2 class="anchored" data-anchor-id="a.-guide-robots-and-physical-human-robot-interaction">A. Guide Robots and Physical Human-Robot Interaction</h2>
+<p>导盲机器人通过方向提示、物理牵引或共享控制帮助人类完成导航任务。相比普通移动机器人，导盲机器人必须同时考虑环境安全和人机交互质量。</p>
+<p>已有研究关注了导盲机器人路径规划、避障、人机协同导航和物理人机交互。然而，许多方法主要关注机器人轨迹本身，对被引导人的人体安全建模不足。</p>
+<p>在 leash-based 或 harness-based 系统中，机器人和人之间存在物理耦合。这种耦合会带来人类响应延迟、牵引约束、人机速度不一致以及 robot intention 和 human intention 之间的冲突。因此，导盲机器人需要同时建模 robot motion、human motion 和 interaction state。</p>
+<p>Delay harness model 通常假设机器人先执行动作，然后人类根据绳索方向和绳长约束进行被动随动。该模型可以简单有效地描述 passive-following 行为。</p>
+<p>但是，真实人类不是完全被动的。在交互过程中，人类可能主动避障、调整方向、减速、停顿、抵抗机器人，或者短时主导运动方向。因此，更合理的人类运动模型应同时包含 passive harness-following motion 和 active human motion。</p>
+</section>
+<section id="b.-diffusion-policy-and-safe-diffusion-planning" class="level2">
+<h2 class="anchored" data-anchor-id="b.-diffusion-policy-and-safe-diffusion-planning">B. Diffusion Policy and Safe Diffusion Planning</h2>
+<p>Diffusion policy 已被用于机器人行为学习和轨迹生成。它能够表示多模态动作分布，并从 demonstration 中学习平滑的动作序列。</p>
+<p>对于导盲机器人而言，diffusion policy 的优势在于可以学习复杂的人机协同行为。然而，标准 diffusion policy 通常缺乏显式安全保证，生成动作可能导致机器人碰撞、人体碰撞或牵引约束违反。</p>
+<p>Safe diffusion planning 通常通过 safety filter、action projection 或 quadratic programming 对 diffusion action 进行修正。其基本形式可以写为：</p>
+<p><span class="math display">\[
+\begin{aligned}
+\mathbf{a}_t^*
+&amp;=
+\arg\min_{\mathbf{a}}
+\left\|
+\mathbf{a}
+-
+\mathbf{a}_t^{diff}
+\right\|^2
+\end{aligned}
+\]</span> 其中，<span class="math inline">\(\mathbf{a}_t^{diff}\)</span> 是 diffusion policy 生成的原始动作，<span class="math inline">\(\mathbf{a}_t^*\)</span> 是经过安全投影后的动作。</p>
+<p>现有 safe diffusion 方法通常主要考虑机器人自身的碰撞约束。对于导盲机器人而言，这种 robot-only safety 并不充分，因为即使机器人不碰撞，被引导人的身体轨迹仍可能与障碍物发生碰撞。</p>
+</section>
+<section id="c.-compliance-control-in-human-robot-interaction" class="level2">
+<h2 class="anchored" data-anchor-id="c.-compliance-control-in-human-robot-interaction">C. Compliance Control in Human-Robot Interaction</h2>
+<p>Compliance control、impedance control 和 admittance control 广泛用于物理人机交互。它们可以使机器人对外部人类输入作出柔顺响应，提高交互舒适性。</p>
+<p>在导盲机器人场景中，compliance control 可以帮助机器人顺应人类主动意图。然而，如果机器人全程顺应，人类的随机扰动或短时偏移可能持续影响机器人运动，导致导航效率下降。因此，本文提出 interaction-aware compliance，仅在识别出 human-leading 状态时启用顺应控制。</p>
+<hr>
+</section>
+</section>
+<section id="iii.-problem-formulation" class="level1">
+<h1>III. Problem Formulation</h1>
+<section id="a.-system-model" class="level2">
+<h2 class="anchored" data-anchor-id="a.-system-model">A. System Model</h2>
+<p>本文考虑一个机器人和一个人通过 leash 或 harness 相连，并在包含静态障碍物的二维环境中运动。</p>
+<p>系统状态定义为：</p>
+<p><span class="math display">\[
+\mathbf{x}*t =
+[
+\mathbf{p}*{r,t},
+\theta_{r,t},
+\mathbf{v}*{r,t},
+\mathbf{p}*{h,t},
+\mathbf{v}_{h,t},
+\mathbf{l}_t,
+d_t
+]
+\]</span></p>
+<p>其中，<span class="math inline">\(\mathbf{p}{r,t}\)</span> 表示机器人位置，<span class="math inline">\(\theta{r,t}\)</span> 表示机器人朝向，<span class="math inline">\(\mathbf{v}{r,t}\)</span> 表示机器人速度，<span class="math inline">\(\mathbf{p}{h,t}\)</span> 表示人类位置，<span class="math inline">\(\mathbf{v}_{h,t}\)</span> 表示人类速度，<span class="math inline">\(\mathbf{l}_t\)</span> 表示牵引方向，<span class="math inline">\(d_t\)</span> 表示机器人和人之间的距离。</p>
+<p>机器人动作定义为：</p>
+<p><span class="math display">\[
+\mathbf{a}_t =
+[
+v_t,
+\omega_t
+]
+\]</span></p>
+<p>其中，<span class="math inline">\(v_t\)</span> 表示线速度指令，<span class="math inline">\(\omega_t\)</span> 表示角速度指令。</p>
+</section>
+<section id="b.-planning-objective" class="level2">
+<h2 class="anchored" data-anchor-id="b.-planning-objective">B. Planning Objective</h2>
+<p>规划目标是生成机器人动作序列：</p>
+<p>$$ _{0:T} ================</p>
+<p>{ _0, _1, …, _T } $$</p>
+<p>使人机系统安全、高效地到达目标位置。</p>
+<p>该目标包括：</p>
+<ul>
+<li>到达目标点；</li>
+<li>避免机器人碰撞；</li>
+<li>避免人体碰撞；</li>
+<li>满足 leash 或 harness 约束；</li>
+<li>保持轨迹平滑；</li>
+<li>在必要时顺应人类意图；</li>
+<li>避免不必要的 compliance。</li>
+</ul>
+</section>
+<section id="c.-robot-safety-constraint" class="level2">
+<h2 class="anchored" data-anchor-id="c.-robot-safety-constraint">C. Robot Safety Constraint</h2>
+<p>机器人需要与障碍物保持安全距离：</p>
+<p><span class="math display">\[
+d(\mathbf{p}_{r,t}, \mathcal{O})
+\geq
+d_r^{safe}
+\]</span></p>
+<p>其中，<span class="math inline">\(\mathcal{O}\)</span> 表示障碍物集合，<span class="math inline">\(d_r^{safe}\)</span> 表示机器人安全距离。</p>
+</section>
+<section id="d.-human-safety-constraint" class="level2">
+<h2 class="anchored" data-anchor-id="d.-human-safety-constraint">D. Human Safety Constraint</h2>
+<p>被引导人也需要与障碍物保持安全距离：</p>
+<p><span class="math display">\[
+d(\mathbf{p}_{h,t}, \mathcal{O})
+\geq
+d_h^{safe}
+\]</span></p>
+<p>其中，<span class="math inline">\(d_h^{safe}\)</span> 表示人体安全距离。</p>
+<p>这一约束非常关键，因为人体轨迹可能由于运动滞后、身体宽度、绳索方向和人机距离等因素与机器人轨迹不同。</p>
+</section>
+<section id="e.-leash-or-harness-constraint" class="level2">
+<h2 class="anchored" data-anchor-id="e.-leash-or-harness-constraint">E. Leash or Harness Constraint</h2>
+<p>机器人和人之间的距离应保持在合理范围内：</p>
+<p>$$ d_{min} | _{r,t} —————-</p>
+<p><em>{h,t} | d</em>{max} $$</p>
+<p>其中，<span class="math inline">\(d_{min}\)</span> 和 <span class="math inline">\(d_{max}\)</span> 分别表示最小和最大可行牵引距离。</p>
+</section>
+<section id="f.-interaction-states" class="level2">
+<h2 class="anchored" data-anchor-id="f.-interaction-states">F. Interaction States</h2>
+<p>本文将交互状态定义为隐变量：</p>
+<p><span class="math display">\[
+z_t
+\in
+{
+\text{Robot-leading},
+\text{Human-leading},
+\text{Uncertain}
+}
+\]</span></p>
+<p>其中：</p>
+<p><strong>Robot-leading</strong> 表示机器人主要决定运动方向，人类主要被动跟随。</p>
+<p><strong>Human-leading</strong> 表示人类主动影响运动方向或速度，机器人应顺应人类意图。</p>
+<p><strong>Uncertain</strong> 表示交互状态处于同步、冲突、过渡或观测不明确状态。</p>
+<hr>
+</section>
+</section>
+<section id="iv.-proposed-method" class="level1">
+<h1>IV. Proposed Method</h1>
+<section id="a.-framework-overview" class="level2">
+<h2 class="anchored" data-anchor-id="a.-framework-overview">A. Framework Overview</h2>
+<p>本文方法包含四个主要模块：</p>
+<ol type="1">
+<li>diffusion policy 生成候选动作；</li>
+<li>human-safe QP projection 修正动作；</li>
+<li>active-passive human interaction model 预测人类运动；</li>
+<li>HMM-based interaction recognition 判断交互状态，并触发 interaction-aware compliance control。</li>
+</ol>
+<p>整体流程为：</p>
+<p>Observation → Diffusion Policy → Human-Safe QP Projection → Active-Passive Human Motion Model → HMM Interaction Recognition → Interaction-Aware Compliance Control → Robot Execution</p>
+</section>
+<section id="b.-diffusion-policy-baseline" class="level2">
+<h2 class="anchored" data-anchor-id="b.-diffusion-policy-baseline">B. Diffusion Policy Baseline</h2>
+<p>给定当前观测 <span class="math inline">\(\mathbf{o}_t\)</span>，diffusion policy 生成候选机器人动作：</p>
+<p><span class="math display">\[
+\mathbf{a}*t^{diff}
+\sim
+\pi*\theta
+(
+\mathbf{a}_t
+\mid
+\mathbf{o}_t
+)
+\]</span></p>
+<p>观测可以包含：</p>
+<p><span class="math display">\[
+\mathbf{o}_t =
+[
+\mathbf{x}_t,
+\mathbf{g},
+\mathcal{O},
+\mathbf{h}_t
+]
+\]</span></p>
+<p>其中，<span class="math inline">\(\mathbf{x}_t\)</span> 表示人机系统状态，<span class="math inline">\(\mathbf{g}\)</span> 表示目标位置，<span class="math inline">\(\mathcal{O}\)</span> 表示障碍物信息，<span class="math inline">\(\mathbf{h}_t\)</span> 表示历史观测。</p>
+<p>Diffusion policy 能够生成平滑且接近示范数据分布的动作，但其输出动作可能违反机器人安全、人体安全或牵引约束。</p>
+</section>
+<section id="c.-human-safe-qp-projection" class="level2">
+<h2 class="anchored" data-anchor-id="c.-human-safe-qp-projection">C. Human-Safe QP Projection</h2>
+<p>为了保证安全，本文使用 QP-based safety layer 将 diffusion action 投影到可行安全动作空间中：</p>
+<p>$$ _t^* ==============</p>
+<p>_{} | ———-</p>
+<p>_t^{diff} |^2 $$</p>
+<p>约束条件为：</p>
+<p><span class="math display">\[
+d(\hat{\mathbf{p}}_{r,t+1}, \mathcal{O})
+\geq
+d_r^{safe}
+\]</span></p>
+<p><span class="math display">\[
+d(\hat{\mathbf{p}}_{h,t+1}, \mathcal{O})
+\geq
+d_h^{safe}
+\]</span></p>
+<p>$$ d_{min} | _{r,t+1} ————————</p>
+<p><em>{h,t+1} | d</em>{max} $$</p>
+<p>其中，<span class="math inline">\(\hat{\mathbf{p}}*{r,t+1}\)</span> 和 <span class="math inline">\(\hat{\mathbf{p}}*{h,t+1}\)</span> 分别表示执行动作 <span class="math inline">\(\mathbf{a}\)</span> 后预测得到的机器人和人类下一时刻位置。</p>
+<p>第一个约束保证机器人安全。第二个约束是本文提出的 human collision constraint，用于显式保证人体安全。第三个约束保证 leash 或 harness 关系保持合理。</p>
+</section>
+<section id="d.-delay-harness-baseline" class="level2">
+<h2 class="anchored" data-anchor-id="d.-delay-harness-baseline">D. Delay Harness Baseline</h2>
+<p>Delay harness model 假设机器人先执行动作，然后人类根据牵引方向和绳长约束被动移动。</p>
+<p>被动人类运动可以写为：</p>
+<p>$$ _{h,t}^{passive} ==========================</p>
+<p>f_{harness} ( <em>{r,t}, </em>{h,t}, _{r,t}, d_t ) $$</p>
+<p>其中，<span class="math inline">\(\mathbf{u}_{h,t}^{passive}\)</span> 表示由机器人运动和牵引约束诱导的人类被动运动。</p>
+<p>该模型简单、可解释，适合仿真中的被动随动场景，但它默认人类只是被动跟随者，无法表达主动避障、迟疑、抵抗或 human-leading 行为。</p>
+</section>
+<section id="e.-active-passive-human-motion-model" class="level2">
+<h2 class="anchored" data-anchor-id="e.-active-passive-human-motion-model">E. Active-Passive Human Motion Model</h2>
+<p>为了建模人类主动性，本文引入 human active motion：</p>
+<p><span class="math display">\[
+\mathbf{u}_{h,t}^{active}
+\]</span></p>
+<p>该主动运动可以表示：</p>
+<ul>
+<li>人类随机步态扰动；</li>
+<li>局部避障行为；</li>
+<li>迟疑或减速；</li>
+<li>对机器人牵引的抵抗；</li>
+<li>短时 human-leading 方向；</li>
+<li>人类偏好的运动方向。</li>
+</ul>
+<p>最终的人类运动建模为主动运动和被动运动的混合：</p>
+<p>$$ _{h,t} ================</p>
+<p>k_t <em>{h,t}^{active} + (1-k_t) </em>{h,t}^{passive} $$</p>
+<p>其中，<span class="math inline">\(k_t\)</span> 是 human activeness coefficient。</p>
+<p>当 <span class="math inline">\(k_t = 0\)</span> 时，表示人类完全被动随动。</p>
+<p>当 <span class="math inline">\(k_t = 1\)</span> 时，表示人类完全主动运动。</p>
+<p>当 <span class="math inline">\(0 &lt; k_t &lt; 1\)</span> 时，表示人类运动由主动意图和被动牵引共同决定。</p>
+</section>
+<section id="f.-human-activeness-estimation" class="level2">
+<h2 class="anchored" data-anchor-id="f.-human-activeness-estimation">F. Human Activeness Estimation</h2>
+<p>给定观测到的人类运动 <span class="math inline">\(\mathbf{u}_{h,t}^{obs}\)</span>，可以通过最小化预测误差估计 <span class="math inline">\(k_t\)</span>：</p>
+<p>$$ k_t^* =====</p>
+<p><em>{k_t} | </em>{h,t}^{obs} ———————-</p>
+<p>|^2 $$</p>
+<p>估计得到的 <span class="math inline">\(k_t^*\)</span> 可以作为 HMM 的输入特征之一。</p>
+<p>较大的 <span class="math inline">\(k_t^*\)</span> 表示当前人类主动性更强；较小的 <span class="math inline">\(k_t^*\)</span> 表示当前人类更接近被动跟随。</p>
+</section>
+<section id="g.-hmm-based-interaction-recognition" class="level2">
+<h2 class="anchored" data-anchor-id="g.-hmm-based-interaction-recognition">G. HMM-Based Interaction Recognition</h2>
+<p>交互状态被建模为隐变量：</p>
+<p><span class="math display">\[
+z_t
+\in
+{
+\text{Robot-leading},
+\text{Human-leading},
+\text{Uncertain}
+}
+\]</span></p>
+<p>HMM 的观测特征定义为：</p>
+<p><span class="math display">\[
+\mathbf{y}_t =
+[
+s_t^{lead},
+s_t^{extension},
+v_t^{shared},
+\Delta\theta_t,
+k_t
+]
+\]</span></p>
+<p>其中，<span class="math inline">\(s_t^{lead}\)</span> 表示 robot lead score，<span class="math inline">\(s_t^{extension}\)</span> 表示 link extension score，<span class="math inline">\(v_t^{shared}\)</span> 表示 shared speed，<span class="math inline">\(\Delta\theta_t\)</span> 表示机器人和人类速度方向差，<span class="math inline">\(k_t\)</span> 表示估计得到的人类主动性系数。</p>
+<p>HMM 联合概率为：</p>
+<p>$$ p(z_{1:T}, _{1:T}) ============================</p>
+<p>p(z_1) <em>{t=2}^{T} p(z_t z</em>{t-1}) _{t=1}^{T} p(_t z_t) $$</p>
+<p>通过 Viterbi 解码得到最可能的状态序列：</p>
+<p>$$ z_{1:T}^* =========</p>
+<p><em>{z</em>{1:T}} p(z_{1:T} _{1:T}) $$</p>
+<p>相比逐帧分类，HMM 可以利用时间连续性，减少状态识别抖动，提高 interaction state recognition 的稳定性。</p>
+</section>
+<section id="h.-interaction-aware-compliance-control" class="level2">
+<h2 class="anchored" data-anchor-id="h.-interaction-aware-compliance-control">H. Interaction-Aware Compliance Control</h2>
+<p>Full-time compliance control 在每个时刻都启用顺应控制：</p>
+<p>$$ _t ============</p>
+<p>_t^{plan} + _t^{comp} $$</p>
+<p>其中，<span class="math inline">\(\mathbf{a}_t^{plan}\)</span> 表示规划动作，<span class="math inline">\(\mathbf{a}_t^{comp}\)</span> 表示顺应控制修正项。</p>
+<p>虽然 full-time compliance 可以提高舒适性，但它可能使机器人持续受到人类随机扰动影响，导致导航效率下降。</p>
+<p>因此，本文提出 interaction-aware compliance control：</p>
+$$ _t =
+<span class="math display">\[\begin{cases}
+\mathbf{a}_t^{plan}
++
+\mathbf{a}_t^{comp},
+&amp;
+z_t
+===
+
+\text{Human-leading}
+\
+\mathbf{a}_t^{plan},
+&amp;
+z_t
+===
+
+\text{Robot-leading}
+\
+\mathbf{a}_t^{plan}
++
+\lambda
+\mathbf{a}_t^{comp},
+&amp;
+z_t
+===
+
+\text{Uncertain}
+\end{cases}\text{Uncertain}\]</span>
+<p>\end{cases} $$</p>
+<p>其中，<span class="math inline">\(0 &lt; \lambda &lt; 1\)</span> 表示 uncertain 状态下的部分顺应强度。</p>
+<p>该设计使机器人只在 human-leading 状态下充分顺应人类意图，在 robot-leading 状态下保持高效引导，在 uncertain 状态下采用保守的部分顺应策略。</p>
+</section>
+<section id="i.-algorithm-summary" class="level2">
+<h2 class="anchored" data-anchor-id="i.-algorithm-summary">I. Algorithm Summary</h2>
+<p><strong>Algorithm 1: Human-Safe Diffusion Planning with Interaction-Aware Compliance</strong></p>
+<p>输入：当前观测 <span class="math inline">\(\mathbf{o}_t\)</span>、机器人状态、人类状态、障碍物地图、训练好的 diffusion policy 和 HMM model。</p>
+<p>输出：最终机器人动作 <span class="math inline">\(\mathbf{a}_t\)</span>。</p>
+<ol type="1">
+<li>从 diffusion policy 采样候选动作 <span class="math inline">\(\mathbf{a}_t^{diff}\)</span>。</li>
+<li>预测机器人下一时刻位置 <span class="math inline">\(\hat{\mathbf{p}}_{r,t+1}\)</span>。</li>
+<li>使用 interaction model 预测人类下一时刻位置 <span class="math inline">\(\hat{\mathbf{p}}_{h,t+1}\)</span>。</li>
+<li>求解 human-safe QP projection，得到 <span class="math inline">\(\mathbf{a}_t^*\)</span>。</li>
+<li>估计 human activeness coefficient <span class="math inline">\(k_t\)</span>。</li>
+<li>提取 HMM 观测特征 <span class="math inline">\(\mathbf{y}_t\)</span>。</li>
+<li>使用 HMM 推断 interaction state <span class="math inline">\(z_t\)</span>。</li>
+<li>根据 <span class="math inline">\(z_t\)</span> 启用对应的 compliance control。</li>
+<li>执行最终机器人动作 <span class="math inline">\(\mathbf{a}_t\)</span>。</li>
+</ol>
+<hr>
+</section>
+</section>
+<section id="v.-simulation-experiments" class="level1">
+<h1>V. Simulation Experiments</h1>
+<section id="a.-simulation-setup" class="level2">
+<h2 class="anchored" data-anchor-id="a.-simulation-setup">A. Simulation Setup</h2>
+<p>仿真实验包含多种导盲机器人导航场景：</p>
+<ul>
+<li>直线走廊引导；</li>
+<li>窄通道通过；</li>
+<li>障碍物绕行；</li>
+<li>急转弯；</li>
+<li>人类迟疑；</li>
+<li>人类主动偏移；</li>
+<li>人类抵抗；</li>
+<li>短时 human-leading 行为。</li>
+</ul>
+<p>数据采集与点云生成流程如 <a href="#fig-simulator-system" class="quarto-xref">Figure&nbsp;1</a> 所示。pygame 负责交互与可视化，PhysicsEngine 更新人机状态；可选 Mid-360 后端将状态同步到 Gazebo，经 sensor render library 和 ROS PointCloud2 生成点云，并与轨迹一起写入 episode。回放阶段可重放已有 episode，批量补生成点云。</p>
+<div id="fig-simulator-system" class="quarto-float quarto-figure quarto-figure-center anchored">
+<figure class="quarto-float quarto-float-fig figure">
+<div aria-describedby="fig-simulator-system-caption-0ceaefa1-69ba-4598-a22c-09a6ac19f8ca">
+<img src="simulator_system.png" class="img-fluid figure-img" style="width:95.0%">
+</div>
+<figcaption class="quarto-float-caption-bottom quarto-float-caption quarto-float-fig" id="fig-simulator-system-caption-0ceaefa1-69ba-4598-a22c-09a6ac19f8ca">
+Figure&nbsp;1: Simulator pipeline for data collection, replay, and ROS point-cloud transcription.
+</figcaption>
+</figure>
+</div>
+<p>仿真系统包含：</p>
+<ul>
+<li>机器人动力学模型；</li>
+<li>人类运动模型；</li>
+<li>leash 或 harness 约束；</li>
+<li>障碍物地图；</li>
+<li>目标点；</li>
+<li>active-passive human motion model。</li>
+</ul>
+</section>
+<section id="b.-compared-methods" class="level2">
+<h2 class="anchored" data-anchor-id="b.-compared-methods">B. Compared Methods</h2>
+<p>实验对比以下方法：</p>
+<ol type="1">
+<li><p><strong>Diffusion Policy</strong> 原始 diffusion policy，不包含显式 safety projection。</p></li>
+<li><p><strong>SafeDiffuser</strong> 加入机器人自身安全约束的 diffusion planner。</p></li>
+<li><p><strong>Delay Harness</strong> 使用纯被动人类随动模型，不包含主动人类运动。</p></li>
+<li><p><strong>Full-Time Compliance</strong> 全程启用 compliance control。</p></li>
+<li><p><strong>Ours without Human Collision Constraint</strong> 去掉 human collision constraint 的消融版本。</p></li>
+<li><p><strong>Ours without HMM-Triggered Compliance</strong> 去掉 HMM-triggered compliance 的消融版本。</p></li>
+<li><p><strong>Ours Full System</strong> 本文完整方法。</p></li>
+</ol>
+</section>
+<section id="c.-evaluation-metrics" class="level2">
+<h2 class="anchored" data-anchor-id="c.-evaluation-metrics">C. Evaluation Metrics</h2>
+<section id="safety-metrics" class="level3">
+<h3 class="anchored" data-anchor-id="safety-metrics">1) Safety Metrics</h3>
+<ul>
+<li>robot collision rate；</li>
+<li>human collision rate；</li>
+<li>minimum robot-obstacle distance；</li>
+<li>minimum human-obstacle distance；</li>
+<li>leash constraint violation rate。</li>
+</ul>
+</section>
+<section id="efficiency-metrics" class="level3">
+<h3 class="anchored" data-anchor-id="efficiency-metrics">2) Efficiency Metrics</h3>
+<ul>
+<li>task success rate；</li>
+<li>time to goal；</li>
+<li>path length；</li>
+<li>trajectory smoothness。</li>
+</ul>
+</section>
+<section id="interaction-metrics" class="level3">
+<h3 class="anchored" data-anchor-id="interaction-metrics">3) Interaction Metrics</h3>
+<ul>
+<li>human-leading recognition accuracy；</li>
+<li>robot-leading recognition accuracy；</li>
+<li>HMM state switching consistency；</li>
+<li>compliance activation ratio；</li>
+<li>human activeness estimation error。</li>
+</ul>
+</section>
+<section id="comfort-metrics" class="level3">
+<h3 class="anchored" data-anchor-id="comfort-metrics">4) Comfort Metrics</h3>
+<ul>
+<li>acceleration；</li>
+<li>jerk；</li>
+<li>leash tension variation；</li>
+<li>sudden heading change；</li>
+<li>human velocity deviation。</li>
+</ul>
+</section>
+</section>
+<section id="d.-experiment-1-ablation-of-human-safe-constraints" class="level2">
+<h2 class="anchored" data-anchor-id="d.-experiment-1-ablation-of-human-safe-constraints">D. Experiment 1: Ablation of Human-Safe Constraints</h2>
+<p>该实验用于验证 human collision constraint 是否能够提升人体安全性。</p>
+<p>对比方法包括：</p>
+<ul>
+<li>Diffusion Policy；</li>
+<li>SafeDiffuser；</li>
+<li>SafeDiffuser with Human Collision Constraint。</li>
+</ul>
+<p>主要评价指标包括：</p>
+<ul>
+<li>human collision rate；</li>
+<li>minimum human-obstacle distance；</li>
+<li>success rate；</li>
+<li>path length increase。</li>
+</ul>
+<p>预期结论是，加入 human collision constraint 后，人体碰撞风险显著降低，同时任务成功率不会明显下降。</p>
+</section>
+<section id="e.-experiment-2-comparison-with-safediffuser" class="level2">
+<h2 class="anchored" data-anchor-id="e.-experiment-2-comparison-with-safediffuser">E. Experiment 2: Comparison with SafeDiffuser</h2>
+<p>该实验用于比较本文 human-safe diffusion planner 和原始 SafeDiffuser。</p>
+<p>代表性场景包括：</p>
+<ul>
+<li>机器人能够安全通过，但人可能碰撞；</li>
+<li>窄通道；</li>
+<li>急转弯；</li>
+<li>人体侧向偏移；</li>
+<li>人类响应延迟。</li>
+</ul>
+<p>预期结论是，SafeDiffuser 可以避免机器人自身碰撞，但仍可能生成对人不安全的轨迹。本文方法通过显式建模 human collision constraint 提升人体安全性。</p>
+</section>
+<section id="f.-experiment-3-ablation-of-active-passive-interaction-model" class="level2">
+<h2 class="anchored" data-anchor-id="f.-experiment-3-ablation-of-active-passive-interaction-model">F. Experiment 3: Ablation of Active-Passive Interaction Model</h2>
+<p>该实验用于验证 active-passive human motion model 和 <span class="math inline">\(k_t\)</span> 估计的作用。</p>
+<p>对比方法包括：</p>
+<ul>
+<li>Delay Harness；</li>
+<li>Delay Harness with Random Active Motion；</li>
+<li>Active-Passive Model without <span class="math inline">\(k_t\)</span> Estimation；</li>
+<li>Active-Passive Model with <span class="math inline">\(k_t\)</span> Estimation。</li>
+</ul>
+<p>主要评价指标包括：</p>
+<ul>
+<li>human trajectory prediction error；</li>
+<li>human velocity prediction error；</li>
+<li>interaction state consistency；</li>
+<li>downstream planning success rate。</li>
+</ul>
+<p>预期结论是，相比纯 delay harness model，active-passive interaction model 能更好地描述真实人类运动。</p>
+</section>
+<section id="g.-experiment-4-hmm-based-interaction-recognition" class="level2">
+<h2 class="anchored" data-anchor-id="g.-experiment-4-hmm-based-interaction-recognition">G. Experiment 4: HMM-Based Interaction Recognition</h2>
+<p>该实验用于评估 HMM 对 robot-leading、human-leading 和 uncertain 状态的识别能力。</p>
+<p>对比方法包括：</p>
+<ul>
+<li>rule-based classifier；</li>
+<li>frame-wise classifier；</li>
+<li>HMM without <span class="math inline">\(k_t\)</span>；</li>
+<li>HMM with <span class="math inline">\(k_t\)</span>。</li>
+</ul>
+<p>主要评价指标包括：</p>
+<ul>
+<li>state recognition accuracy；</li>
+<li>temporal consistency；</li>
+<li>false human-leading activation；</li>
+<li>false robot-leading activation；</li>
+<li>transition delay。</li>
+</ul>
+<p>预期结论是，HMM-based recognition 能够减少逐帧状态跳变，提高交互状态识别稳定性。</p>
+</section>
+<section id="h.-experiment-5-interaction-aware-compliance-control" class="level2">
+<h2 class="anchored" data-anchor-id="h.-experiment-5-interaction-aware-compliance-control">H. Experiment 5: Interaction-Aware Compliance Control</h2>
+<p>该实验用于验证 HMM-triggered compliance 是否优于 full-time compliance。</p>
+<p>对比方法包括：</p>
+<ul>
+<li>No Compliance；</li>
+<li>Full-Time Compliance；</li>
+<li>HMM-Triggered Compliance。</li>
+</ul>
+<p>主要评价指标包括：</p>
+<ul>
+<li>success rate；</li>
+<li>time to goal；</li>
+<li>path length；</li>
+<li>compliance activation ratio；</li>
+<li>human intention following score；</li>
+<li>human collision rate。</li>
+</ul>
+<p>预期结论是，HMM-triggered compliance 能够在必要时顺应人类意图，同时避免 full-time compliance 导致的效率损失。</p>
+</section>
+<section id="i.-overall-simulation-results" class="level2">
+<h2 class="anchored" data-anchor-id="i.-overall-simulation-results">I. Overall Simulation Results</h2>
+<p>综合对比方法包括：</p>
+<ul>
+<li>Diffusion Policy；</li>
+<li>SafeDiffuser；</li>
+<li>Human-Safe Diffuser；</li>
+<li>Full-Time Compliance；</li>
+<li>Ours Full System。</li>
+</ul>
+<p>推荐结果表格如下：</p>
+<table class="caption-top table">
+<colgroup>
+<col style="width: 21%">
+<col style="width: 9%">
+<col style="width: 18%">
+<col style="width: 18%">
+<col style="width: 6%">
+<col style="width: 14%">
+<col style="width: 9%">
+</colgroup>
+<thead>
+<tr class="header">
+<th>Method</th>
+<th style="text-align: right;">Success ↑</th>
+<th style="text-align: right;">Human Collision ↓</th>
+<th style="text-align: right;">Robot Collision ↓</th>
+<th style="text-align: right;">Time ↓</th>
+<th style="text-align: right;">Path Length ↓</th>
+<th style="text-align: right;">Comfort ↑</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>Diffusion Policy</td>
+<td style="text-align: right;"></td>
+<td style="text-align: right;"></td>
+<td style="text-align: right;"></td>
+<td style="text-align: right;"></td>
+<td style="text-align: right;"></td>
+<td style="text-align: right;"></td>
+</tr>
+<tr class="even">
+<td>SafeDiffuser</td>
+<td style="text-align: right;"></td>
+<td style="text-align: right;"></td>
+<td style="text-align: right;"></td>
+<td style="text-align: right;"></td>
+<td style="text-align: right;"></td>
+<td style="text-align: right;"></td>
+</tr>
+<tr class="odd">
+<td>Human-Safe Diffuser</td>
+<td style="text-align: right;"></td>
+<td style="text-align: right;"></td>
+<td style="text-align: right;"></td>
+<td style="text-align: right;"></td>
+<td style="text-align: right;"></td>
+<td style="text-align: right;"></td>
+</tr>
+<tr class="even">
+<td>Full-Time Compliance</td>
+<td style="text-align: right;"></td>
+<td style="text-align: right;"></td>
+<td style="text-align: right;"></td>
+<td style="text-align: right;"></td>
+<td style="text-align: right;"></td>
+<td style="text-align: right;"></td>
+</tr>
+<tr class="odd">
+<td>Ours Full System</td>
+<td style="text-align: right;"></td>
+<td style="text-align: right;"></td>
+<td style="text-align: right;"></td>
+<td style="text-align: right;"></td>
+<td style="text-align: right;"></td>
+<td style="text-align: right;"></td>
+</tr>
+</tbody>
+</table>
+<p>预期总体结论是，本文方法在 safety、efficiency 和 interaction quality 之间取得更好的平衡。</p>
+<hr>
+</section>
+</section>
+<section id="vi.-real-world-experiments" class="level1">
+<h1>VI. Real-World Experiments</h1>
+<section id="a.-hardware-platform" class="level2">
+<h2 class="anchored" data-anchor-id="a.-hardware-platform">A. Hardware Platform</h2>
+<p>真实实验平台包括：</p>
+<ul>
+<li>移动导盲机器人；</li>
+<li>leash 或 harness 牵引机构；</li>
+<li>onboard computing unit；</li>
+<li>定位传感器；</li>
+<li>障碍物感知传感器；</li>
+<li>人体位置跟踪模块；</li>
+<li>低层速度控制器。</li>
+</ul>
+<p>系统在线运行本文提出的 planning and control framework。</p>
+</section>
+<section id="b.-real-world-scenarios" class="level2">
+<h2 class="anchored" data-anchor-id="b.-real-world-scenarios">B. Real-World Scenarios</h2>
+<p>真实实验包含以下场景：</p>
+<ol type="1">
+<li>straight guidance；</li>
+<li>turning guidance；</li>
+<li>narrow passage crossing；</li>
+<li>obstacle avoidance；</li>
+<li>human active deviation；</li>
+<li>human hesitation or stopping；</li>
+<li>human-leading recovery。</li>
+</ol>
+</section>
+<section id="c.-compared-methods" class="level2">
+<h2 class="anchored" data-anchor-id="c.-compared-methods">C. Compared Methods</h2>
+<p>真实实验中建议重点比较以下方法：</p>
+<ol type="1">
+<li>SafeDiffuser；</li>
+<li>Full-Time Compliance；</li>
+<li>Ours Full System。</li>
+</ol>
+</section>
+<section id="d.-evaluation-metrics" class="level2">
+<h2 class="anchored" data-anchor-id="d.-evaluation-metrics">D. Evaluation Metrics</h2>
+<p>真实实验评价指标包括：</p>
+<ul>
+<li>task success rate；</li>
+<li>completion time；</li>
+<li>human near-collision count；</li>
+<li>robot near-collision count；</li>
+<li>compliance activation frequency；</li>
+<li>human intervention count；</li>
+<li>subjective comfort score；</li>
+<li>subjective safety score。</li>
+</ul>
+</section>
+<section id="e.-real-world-results" class="level2">
+<h2 class="anchored" data-anchor-id="e.-real-world-results">E. Real-World Results</h2>
+<p>真实实验需要展示以下结论：</p>
+<ul>
+<li>human-safe constraint 能减少人体 near-collision；</li>
+<li>HMM 能识别人类主动运动；</li>
+<li>在 human-leading 状态下机器人能够顺应人类；</li>
+<li>在 robot-leading 状态下机器人能够保持高效引导；</li>
+<li>相比 full-time compliance，本文方法在保持舒适性的同时完成时间更短。</li>
+</ul>
+<hr>
+</section>
+</section>
+<section id="vii.-discussion" class="level1">
+<h1>VII. Discussion</h1>
+<section id="a.-effect-of-human-collision-constraints" class="level2">
+<h2 class="anchored" data-anchor-id="a.-effect-of-human-collision-constraints">A. Effect of Human Collision Constraints</h2>
+<p>本节讨论为什么 robot-only safety 对导盲机器人是不够的。</p>
+<p>即使机器人轨迹无碰撞，人类轨迹仍可能因为以下原因发生风险：</p>
+<ul>
+<li>人类响应延迟；</li>
+<li>人体宽度；</li>
+<li>侧向偏移；</li>
+<li>绳索牵引方向；</li>
+<li>转弯几何关系；</li>
+<li>人机距离变化。</li>
+</ul>
+<p>因此，human collision constraint 是导盲机器人安全规划中的关键组成部分。</p>
+</section>
+<section id="b.-effect-of-human-activeness-modeling" class="level2">
+<h2 class="anchored" data-anchor-id="b.-effect-of-human-activeness-modeling">B. Effect of Human Activeness Modeling</h2>
+<p>Delay harness model 对 passive-following 场景有效，但无法表达 human active intention。</p>
+<p>Active-passive model 能更好地表示：</p>
+<ul>
+<li>人类主动避障；</li>
+<li>人类迟疑；</li>
+<li>短时抵抗；</li>
+<li>human-leading 行为；</li>
+<li>人机共同决定的混合运动。</li>
+</ul>
+<p>其中，<span class="math inline">\(k_t\)</span> 提供了一个紧凑的人类主动性表征。</p>
+</section>
+<section id="c.-why-interaction-aware-compliance-is-better-than-full-time-compliance" class="level2">
+<h2 class="anchored" data-anchor-id="c.-why-interaction-aware-compliance-is-better-than-full-time-compliance">C. Why Interaction-Aware Compliance Is Better Than Full-Time Compliance</h2>
+<p>Full-time compliance 可以提高舒适性，但会降低任务效率。No compliance 可以保持效率，但可能忽略人类意图。</p>
+<p>Interaction-aware compliance 在二者之间取得折中：</p>
+<ul>
+<li>human-leading 状态下顺应人类；</li>
+<li>robot-leading 状态下保持高效引导；</li>
+<li>uncertain 状态下部分顺应。</li>
+</ul>
+<p>因此，该方法能够同时提高交互适应性和导航效率。</p>
+</section>
+<section id="d.-limitations" class="level2">
+<h2 class="anchored" data-anchor-id="d.-limitations">D. Limitations</h2>
+<p>本文方法仍存在以下局限。</p>
+<p>第一，HMM 状态识别依赖轨迹和交互特征的质量。</p>
+<p>第二，human active motion model 仍然较为简化，无法覆盖所有真实人类行为。</p>
+<p>第三，<span class="math inline">\(k_t\)</span> 的估计可能受到传感器噪声影响。</p>
+<p>第四，真实实验的规模和参与者多样性可能有限。</p>
+<p>第五，本文方法主要适用于 leash-based 或 harness-based guide robot。</p>
+<hr>
+</section>
+</section>
+<section id="viii.-conclusion" class="level1">
+<h1>VIII. Conclusion</h1>
+<p>本文提出了一种面向导盲机器人的 human-safe diffusion planning and interaction-aware compliance control framework。该方法首先在 SafeDiffuser-style QP projection 中加入 human collision constraint，从而显式考虑被引导人的身体安全。其次，本文在 delay harness model 基础上引入 active-passive human motion model，并估计 human activeness coefficient。进一步，本文使用 HMM 根据时间序列交互特征识别 robot-leading、human-leading 和 uncertain 状态。最后，本文提出 interaction-aware compliance controller，仅在 human-leading 状态下充分启用 compliance control。</p>
+<p>仿真和真实实验表明，相比 diffusion policy、SafeDiffuser、delay harness model 和 full-time compliance control，本文方法能够更好地提升人体安全性，保持导航效率，并适应人类主动意图。</p>
+</section>
+
+</main>
+<!-- /main column -->
+<script id="quarto-html-after-body" type="application/javascript">
+  window.document.addEventListener("DOMContentLoaded", function (event) {
+    const icon = "";
+    const anchorJS = new window.AnchorJS();
+    anchorJS.options = {
+      placement: 'right',
+      icon: icon
+    };
+    anchorJS.add('.anchored');
+    const isCodeAnnotation = (el) => {
+      for (const clz of el.classList) {
+        if (clz.startsWith('code-annotation-')) {                     
+          return true;
+        }
+      }
+      return false;
+    }
+    const onCopySuccess = function(e) {
+      // button target
+      const button = e.trigger;
+      // don't keep focus
+      button.blur();
+      // flash "checked"
+      button.classList.add('code-copy-button-checked');
+      var currentTitle = button.getAttribute("title");
+      button.setAttribute("title", "Copied!");
+      let tooltip;
+      if (window.bootstrap) {
+        button.setAttribute("data-bs-toggle", "tooltip");
+        button.setAttribute("data-bs-placement", "left");
+        button.setAttribute("data-bs-title", "Copied!");
+        tooltip = new bootstrap.Tooltip(button, 
+          { trigger: "manual", 
+            customClass: "code-copy-button-tooltip",
+            offset: [0, -8]});
+        tooltip.show();    
+      }
+      setTimeout(function() {
+        if (tooltip) {
+          tooltip.hide();
+          button.removeAttribute("data-bs-title");
+          button.removeAttribute("data-bs-toggle");
+          button.removeAttribute("data-bs-placement");
+        }
+        button.setAttribute("title", currentTitle);
+        button.classList.remove('code-copy-button-checked');
+      }, 1000);
+      // clear code selection
+      e.clearSelection();
+    }
+    const getTextToCopy = function(trigger) {
+      const outerScaffold = trigger.parentElement.cloneNode(true);
+      const codeEl = outerScaffold.querySelector('code');
+      for (const childEl of codeEl.children) {
+        if (isCodeAnnotation(childEl)) {
+          childEl.remove();
+        }
+      }
+      return codeEl.innerText;
+    }
+    const clipboard = new window.ClipboardJS('.code-copy-button:not([data-in-quarto-modal])', {
+      text: getTextToCopy
+    });
+    clipboard.on('success', onCopySuccess);
+    if (window.document.getElementById('quarto-embedded-source-code-modal')) {
+      const clipboardModal = new window.ClipboardJS('.code-copy-button[data-in-quarto-modal]', {
+        text: getTextToCopy,
+        container: window.document.getElementById('quarto-embedded-source-code-modal')
+      });
+      clipboardModal.on('success', onCopySuccess);
+    }
+      var localhostRegex = new RegExp(/^(?:http|https):\/\/localhost\:?[0-9]*\//);
+      var mailtoRegex = new RegExp(/^mailto:/);
+        var filterRegex = new RegExp('/' + window.location.host + '/');
+      var isInternal = (href) => {
+          return filterRegex.test(href) || localhostRegex.test(href) || mailtoRegex.test(href);
+      }
+      // Inspect non-navigation links and adorn them if external
+     var links = window.document.querySelectorAll('a[href]:not(.nav-link):not(.navbar-brand):not(.toc-action):not(.sidebar-link):not(.sidebar-item-toggle):not(.pagination-link):not(.no-external):not([aria-hidden]):not(.dropdown-item):not(.quarto-navigation-tool):not(.about-link)');
+      for (var i=0; i<links.length; i++) {
+        const link = links[i];
+        if (!isInternal(link.href)) {
+          // undo the damage that might have been done by quarto-nav.js in the case of
+          // links that we want to consider external
+          if (link.dataset.originalHref !== undefined) {
+            link.href = link.dataset.originalHref;
+          }
+        }
+      }
+    function tippyHover(el, contentFn, onTriggerFn, onUntriggerFn) {
+      const config = {
+        allowHTML: true,
+        maxWidth: 500,
+        delay: 100,
+        arrow: false,
+        appendTo: function(el) {
+            return el.parentElement;
+        },
+        interactive: true,
+        interactiveBorder: 10,
+        theme: 'quarto',
+        placement: 'bottom-start',
+      };
+      if (contentFn) {
+        config.content = contentFn;
+      }
+      if (onTriggerFn) {
+        config.onTrigger = onTriggerFn;
+      }
+      if (onUntriggerFn) {
+        config.onUntrigger = onUntriggerFn;
+      }
+      window.tippy(el, config); 
+    }
+    const noterefs = window.document.querySelectorAll('a[role="doc-noteref"]');
+    for (var i=0; i<noterefs.length; i++) {
+      const ref = noterefs[i];
+      tippyHover(ref, function() {
+        // use id or data attribute instead here
+        let href = ref.getAttribute('data-footnote-href') || ref.getAttribute('href');
+        try { href = new URL(href).hash; } catch {}
+        const id = href.replace(/^#\/?/, "");
+        const note = window.document.getElementById(id);
+        if (note) {
+          return note.innerHTML;
+        } else {
+          return "";
+        }
+      });
+    }
+    const xrefs = window.document.querySelectorAll('a.quarto-xref');
+    const processXRef = (id, note) => {
+      // Strip column container classes
+      const stripColumnClz = (el) => {
+        el.classList.remove("page-full", "page-columns");
+        if (el.children) {
+          for (const child of el.children) {
+            stripColumnClz(child);
+          }
+        }
+      }
+      stripColumnClz(note)
+      if (id === null || id.startsWith('sec-')) {
+        // Special case sections, only their first couple elements
+        const container = document.createElement("div");
+        if (note.children && note.children.length > 2) {
+          container.appendChild(note.children[0].cloneNode(true));
+          for (let i = 1; i < note.children.length; i++) {
+            const child = note.children[i];
+            if (child.tagName === "P" && child.innerText === "") {
+              continue;
+            } else {
+              container.appendChild(child.cloneNode(true));
+              break;
+            }
+          }
+          if (window.Quarto?.typesetMath) {
+            window.Quarto.typesetMath(container);
+          }
+          return container.innerHTML
+        } else {
+          if (window.Quarto?.typesetMath) {
+            window.Quarto.typesetMath(note);
+          }
+          return note.innerHTML;
+        }
+      } else {
+        // Remove any anchor links if they are present
+        const anchorLink = note.querySelector('a.anchorjs-link');
+        if (anchorLink) {
+          anchorLink.remove();
+        }
+        if (window.Quarto?.typesetMath) {
+          window.Quarto.typesetMath(note);
+        }
+        if (note.classList.contains("callout")) {
+          return note.outerHTML;
+        } else {
+          return note.innerHTML;
+        }
+      }
+    }
+    for (var i=0; i<xrefs.length; i++) {
+      const xref = xrefs[i];
+      tippyHover(xref, undefined, function(instance) {
+        instance.disable();
+        let url = xref.getAttribute('href');
+        let hash = undefined; 
+        if (url.startsWith('#')) {
+          hash = url;
+        } else {
+          try { hash = new URL(url).hash; } catch {}
+        }
+        if (hash) {
+          const id = hash.replace(/^#\/?/, "");
+          const note = window.document.getElementById(id);
+          if (note !== null) {
+            try {
+              const html = processXRef(id, note.cloneNode(true));
+              instance.setContent(html);
+            } finally {
+              instance.enable();
+              instance.show();
+            }
+          } else {
+            // See if we can fetch this
+            fetch(url.split('#')[0])
+            .then(res => res.text())
+            .then(html => {
+              const parser = new DOMParser();
+              const htmlDoc = parser.parseFromString(html, "text/html");
+              const note = htmlDoc.getElementById(id);
+              if (note !== null) {
+                const html = processXRef(id, note);
+                instance.setContent(html);
+              } 
+            }).finally(() => {
+              instance.enable();
+              instance.show();
+            });
+          }
+        } else {
+          // See if we can fetch a full url (with no hash to target)
+          // This is a special case and we should probably do some content thinning / targeting
+          fetch(url)
+          .then(res => res.text())
+          .then(html => {
+            const parser = new DOMParser();
+            const htmlDoc = parser.parseFromString(html, "text/html");
+            const note = htmlDoc.querySelector('main.content');
+            if (note !== null) {
+              // This should only happen for chapter cross references
+              // (since there is no id in the URL)
+              // remove the first header
+              if (note.children.length > 0 && note.children[0].tagName === "HEADER") {
+                note.children[0].remove();
+              }
+              const html = processXRef(null, note);
+              instance.setContent(html);
+            } 
+          }).finally(() => {
+            instance.enable();
+            instance.show();
+          });
+        }
+      }, function(instance) {
+      });
+    }
+        let selectedAnnoteEl;
+        const selectorForAnnotation = ( cell, annotation) => {
+          let cellAttr = 'data-code-cell="' + cell + '"';
+          let lineAttr = 'data-code-annotation="' +  annotation + '"';
+          const selector = 'span[' + cellAttr + '][' + lineAttr + ']';
+          return selector;
+        }
+        const selectCodeLines = (annoteEl) => {
+          const doc = window.document;
+          const targetCell = annoteEl.getAttribute("data-target-cell");
+          const targetAnnotation = annoteEl.getAttribute("data-target-annotation");
+          const annoteSpan = window.document.querySelector(selectorForAnnotation(targetCell, targetAnnotation));
+          const lines = annoteSpan.getAttribute("data-code-lines").split(",");
+          const lineIds = lines.map((line) => {
+            return targetCell + "-" + line;
+          })
+          let top = null;
+          let height = null;
+          let parent = null;
+          if (lineIds.length > 0) {
+              //compute the position of the single el (top and bottom and make a div)
+              const el = window.document.getElementById(lineIds[0]);
+              top = el.offsetTop;
+              height = el.offsetHeight;
+              parent = el.parentElement.parentElement;
+            if (lineIds.length > 1) {
+              const lastEl = window.document.getElementById(lineIds[lineIds.length - 1]);
+              const bottom = lastEl.offsetTop + lastEl.offsetHeight;
+              height = bottom - top;
+            }
+            if (top !== null && height !== null && parent !== null) {
+              // cook up a div (if necessary) and position it 
+              let div = window.document.getElementById("code-annotation-line-highlight");
+              if (div === null) {
+                div = window.document.createElement("div");
+                div.setAttribute("id", "code-annotation-line-highlight");
+                div.style.position = 'absolute';
+                parent.appendChild(div);
+              }
+              div.style.top = top - 2 + "px";
+              div.style.height = height + 4 + "px";
+              div.style.left = 0;
+              let gutterDiv = window.document.getElementById("code-annotation-line-highlight-gutter");
+              if (gutterDiv === null) {
+                gutterDiv = window.document.createElement("div");
+                gutterDiv.setAttribute("id", "code-annotation-line-highlight-gutter");
+                gutterDiv.style.position = 'absolute';
+                const codeCell = window.document.getElementById(targetCell);
+                const gutter = codeCell.querySelector('.code-annotation-gutter');
+                gutter.appendChild(gutterDiv);
+              }
+              gutterDiv.style.top = top - 2 + "px";
+              gutterDiv.style.height = height + 4 + "px";
+            }
+            selectedAnnoteEl = annoteEl;
+          }
+        };
+        const unselectCodeLines = () => {
+          const elementsIds = ["code-annotation-line-highlight", "code-annotation-line-highlight-gutter"];
+          elementsIds.forEach((elId) => {
+            const div = window.document.getElementById(elId);
+            if (div) {
+              div.remove();
+            }
+          });
+          selectedAnnoteEl = undefined;
+        };
+          // Handle positioning of the toggle
+      window.addEventListener(
+        "resize",
+        throttle(() => {
+          elRect = undefined;
+          if (selectedAnnoteEl) {
+            selectCodeLines(selectedAnnoteEl);
+          }
+        }, 10)
+      );
+      function throttle(fn, ms) {
+      let throttle = false;
+      let timer;
+        return (...args) => {
+          if(!throttle) { // first call gets through
+              fn.apply(this, args);
+              throttle = true;
+          } else { // all the others get throttled
+              if(timer) clearTimeout(timer); // cancel #2
+              timer = setTimeout(() => {
+                fn.apply(this, args);
+                timer = throttle = false;
+              }, ms);
+          }
+        };
+      }
+        // Attach click handler to the DT
+        const annoteDls = window.document.querySelectorAll('dt[data-target-cell]');
+        for (const annoteDlNode of annoteDls) {
+          annoteDlNode.addEventListener('click', (event) => {
+            const clickedEl = event.target;
+            if (clickedEl !== selectedAnnoteEl) {
+              unselectCodeLines();
+              const activeEl = window.document.querySelector('dt[data-target-cell].code-annotation-active');
+              if (activeEl) {
+                activeEl.classList.remove('code-annotation-active');
+              }
+              selectCodeLines(clickedEl);
+              clickedEl.classList.add('code-annotation-active');
+            } else {
+              // Unselect the line
+              unselectCodeLines();
+              clickedEl.classList.remove('code-annotation-active');
+            }
+          });
+        }
+    const findCites = (el) => {
+      const parentEl = el.parentElement;
+      if (parentEl) {
+        const cites = parentEl.dataset.cites;
+        if (cites) {
+          return {
+            el,
+            cites: cites.split(' ')
+          };
+        } else {
+          return findCites(el.parentElement)
+        }
+      } else {
+        return undefined;
+      }
+    };
+    var bibliorefs = window.document.querySelectorAll('a[role="doc-biblioref"]');
+    for (var i=0; i<bibliorefs.length; i++) {
+      const ref = bibliorefs[i];
+      const citeInfo = findCites(ref);
+      if (citeInfo) {
+        tippyHover(citeInfo.el, function() {
+          var popup = window.document.createElement('div');
+          citeInfo.cites.forEach(function(cite) {
+            var citeDiv = window.document.createElement('div');
+            citeDiv.classList.add('hanging-indent');
+            citeDiv.classList.add('csl-entry');
+            var biblioDiv = window.document.getElementById('ref-' + cite);
+            if (biblioDiv) {
+              citeDiv.innerHTML = biblioDiv.innerHTML;
+            }
+            popup.appendChild(citeDiv);
+          });
+          return popup.innerHTML;
+        });
+      }
+    }
+  });
+  </script>
+</div> <!-- /content -->
+
+
+
+
+</body></html>

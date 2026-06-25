@@ -1,0 +1,104 @@
+{
+  "scenario": {
+    "frame_count": 360,
+    "fps": 20,
+    "frame_stride": 5,
+    "goal_x": 12.0,
+    "robot_speed": 1.0
+  },
+  "segmentation": {
+    "model_path": "/home/yyf/Downloads/292_transforming_a_quadruped_into_-Supplementary Material/interaction-data/guidedog-mocap-dataprocessing-web2/segmentation.py",
+    "classifier_kind": "drag-threshold",
+    "score_threshold": 1.7164566214530832,
+    "score_threshold_percentile": 40.0,
+    "label_counts": {
+      "guide": 216,
+      "leash": 144,
+      "unknown": 0
+    },
+    "truth_counts": {
+      "guide": 240,
+      "leash": 120
+    },
+    "state_accuracy": 0.9333333333333333
+  },
+  "mocap_continuity": {
+    "max_robot_step_m": 0.04033676927742198,
+    "p95_robot_step_m": 0.0379779536290897,
+    "max_human_step_m": 0.039864982196516206,
+    "p95_human_step_m": 0.037561869045010916
+  },
+  "modes": {
+    "raw_policy": {
+      "reached_goal": true,
+      "completion_time_sec": 23.200000000000003,
+      "completion_action_idx": 92,
+      "final_robot_x": 46.887508392333984,
+      "final_human_x": 45.887508392333984,
+      "robot_path_length": 46.887508392333984,
+      "human_path_length": 46.68750762939453,
+      "mean_forward_action": 0.18000000715255737,
+      "min_forward_action": 0.18000000715255737,
+      "max_forward_action": 0.18000000715255737,
+      "stats": {}
+    },
+    "full_time_compliance": {
+      "reached_goal": true,
+      "completion_time_sec": 82.7,
+      "completion_action_idx": 330,
+      "final_robot_x": 13.065396308898926,
+      "final_human_x": 12.065396308898926,
+      "robot_path_length": 13.065396308898926,
+      "human_path_length": 12.865396499633789,
+      "mean_forward_action": 0.05000000447034836,
+      "min_forward_action": 0.05000000074505806,
+      "max_forward_action": 0.05000000074505806,
+      "stats": {
+        "applied": true,
+        "safety_applied": false,
+        "modified_steps": 360,
+        "safety_modified_steps": 0,
+        "total_steps": 360,
+        "mean_shift": 0.0,
+        "mean_action_shift": 0.1300000101327896,
+        "constraint_count": 0,
+        "min_clearance": "inf"
+      }
+    },
+    "interaction_aware": {
+      "reached_goal": true,
+      "completion_time_sec": 30.150000000000002,
+      "completion_action_idx": 120,
+      "final_robot_x": 33.289764404296875,
+      "final_human_x": 32.289764404296875,
+      "robot_path_length": 33.289764404296875,
+      "human_path_length": 33.08976745605469,
+      "mean_forward_action": 0.12800000607967377,
+      "min_forward_action": 0.05000000074505806,
+      "max_forward_action": 0.18000000715255737,
+      "stats": {
+        "applied": true,
+        "total_steps": 360,
+        "compliance_steps": 144,
+        "guide_steps": 216,
+        "bre_steps": 360,
+        "state_counts": {
+          "guide": 216,
+          "leash": 144
+        },
+        "mean_action_shift": 0.05200000405311585,
+        "mean_shift": 0.0,
+        "modified_steps": 144,
+        "safety_modified_steps": 0,
+        "constraint_count": 0,
+        "min_clearance": "inf"
+      }
+    }
+  },
+  "artifacts": {
+    "segmentation_plot": "/home/yyf/IROS2026/FollowDataset/tests/artifacts/interaction_aware_compliance/interaction_aware_segmentation.png",
+    "progress_action_plot": "/home/yyf/IROS2026/FollowDataset/tests/artifacts/interaction_aware_compliance/interaction_aware_progress_and_gating.png",
+    "summary": "/home/yyf/IROS2026/FollowDataset/tests/artifacts/interaction_aware_compliance/interaction_aware_compliance_control_summary.json",
+    "data": "/home/yyf/IROS2026/FollowDataset/tests/artifacts/interaction_aware_compliance/interaction_aware_compliance_control_data.npz"
+  }
+}

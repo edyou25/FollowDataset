@@ -1,0 +1,144 @@
+{
+  "scenario": {
+    "robot_start": [
+      0.0,
+      0.0
+    ],
+    "human_start": [
+      -0.8199999928474426,
+      0.0
+    ],
+    "robot_radius": 0.22,
+    "human_radius": 0.22,
+    "leash_length": 1.0,
+    "circle_obstacles": [
+      [
+        0.7799999713897705,
+        -0.11999999731779099,
+        0.2199999988079071
+      ]
+    ],
+    "frame_stride": 5,
+    "fps": 20
+  },
+  "modes": {
+    "raw_policy": {
+      "collision": true,
+      "first_hit": {
+        "action_idx": 11,
+        "substep_idx": 1,
+        "who": "robot",
+        "type": "circle",
+        "obstacle_idx": 0,
+        "robot_pos": [
+          0.40910252816414006,
+          0.10831063155135712
+        ],
+        "human_pos": [
+          -0.5573909814228455,
+          -0.14838041996043833
+        ]
+      },
+      "robot_min_clearance": -0.21372178196907043,
+      "human_min_clearance": 0.01538616418838501,
+      "robot_path_length": 1.3741350173950195,
+      "human_path_length": 1.2992737293243408,
+      "robot_final": [
+        1.3021059036254883,
+        0.10368134081363678
+      ],
+      "human_final": [
+        0.3247714042663574,
+        -0.10801953077316284
+      ],
+      "action_forward_min": 0.05000000074505806,
+      "action_forward_max": 0.05000000074505806,
+      "action_heading_abs_max": 0.0,
+      "projected_steps": [],
+      "stats": {}
+    },
+    "compliance_no_safety": {
+      "collision": true,
+      "first_hit": {
+        "action_idx": 10,
+        "substep_idx": 1,
+        "who": "robot",
+        "type": "circle",
+        "obstacle_idx": 0,
+        "robot_pos": [
+          0.36631592758965364,
+          0.025525102142832837
+        ],
+        "human_pos": [
+          -0.608493159717072,
+          -0.19751579837594685
+        ]
+      },
+      "robot_min_clearance": -0.4031185507774353,
+      "human_min_clearance": 0.1093745231628418,
+      "robot_path_length": 1.375894546508789,
+      "human_path_length": 1.270937204360962,
+      "robot_final": [
+        1.268949031829834,
+        -0.2049139440059662
+      ],
+      "human_final": [
+        0.27880772948265076,
+        -0.3449860215187073
+      ],
+      "action_forward_min": 0.05000000074505806,
+      "action_forward_max": 0.05000000074505806,
+      "action_heading_abs_max": 0.13124999403953552,
+      "projected_steps": [],
+      "stats": {
+        "applied": true,
+        "safety_applied": false,
+        "modified_steps": 36,
+        "safety_modified_steps": 0,
+        "total_steps": 36,
+        "mean_shift": 0.0,
+        "mean_action_shift": 0.007531602094887704,
+        "constraint_count": 0,
+        "min_clearance": "inf"
+      }
+    },
+    "compliance_safe": {
+      "collision": false,
+      "first_hit": null,
+      "robot_min_clearance": 0.030266553163528442,
+      "human_min_clearance": 0.9402987957000732,
+      "robot_path_length": 1.2429567575454712,
+      "human_path_length": 1.0149924755096436,
+      "robot_final": [
+        0.37265363335609436,
+        0.873436450958252
+      ],
+      "human_final": [
+        -0.5394633412361145,
+        0.4635063707828522
+      ],
+      "action_forward_min": 0.006893380079418421,
+      "action_forward_max": 0.05000000074505806,
+      "action_heading_abs_max": 0.375,
+      "projected_steps": [
+        8,
+        9,
+        10,
+        11,
+        12,
+        13
+      ],
+      "stats": {
+        "applied": true,
+        "safety_applied": true,
+        "modified_steps": 36,
+        "safety_modified_steps": 6,
+        "total_steps": 36,
+        "mean_shift": 0.0035307636458633673,
+        "mean_action_shift": 0.05824450641456577,
+        "constraint_count": 4,
+        "min_clearance": -0.011245796680450414
+      }
+    }
+  }
+}

@@ -1,0 +1,446 @@
+{
+  "scenario": {
+    "robot_start": [
+      0.0,
+      0.0
+    ],
+    "human_start": [
+      -0.7799999713897705,
+      0.0
+    ],
+    "robot_radius": 0.25,
+    "human_radius": 0.25,
+    "circle_obstacles": [
+      [
+        1.25,
+        0.0,
+        0.2800000011920929
+      ]
+    ],
+    "segment_obstacles": [
+      [
+        -0.4000000059604645,
+        1.0499999523162842,
+        4.400000095367432,
+        1.0499999523162842
+      ],
+      [
+        -0.4000000059604645,
+        -0.8500000238418579,
+        4.400000095367432,
+        -0.8500000238418579
+      ]
+    ]
+  },
+  "pointcloud_source": "mid360_gazebo_plugin: 10000 raw points, 10000 after human mask, 3859 observation points, 78 observation bins",
+  "modes": {
+    "raw_diffusion": {
+      "robot_collision": true,
+      "human_collision": true,
+      "robot_hits": [
+        {
+          "point_idx": 6,
+          "obstacle_idx": 0,
+          "clearance": -0.05187627673149109,
+          "point": [
+            0.8129032254219055,
+            0.19377490878105164
+          ]
+        },
+        {
+          "point_idx": 7,
+          "obstacle_idx": 0,
+          "clearance": -0.13266107439994812,
+          "point": [
+            0.948387086391449,
+            0.2586655616760254
+          ]
+        },
+        {
+          "point_idx": 8,
+          "obstacle_idx": 0,
+          "clearance": -0.17797362804412842,
+          "point": [
+            1.0838710069656372,
+            0.3103606402873993
+          ]
+        },
+        {
+          "point_idx": 9,
+          "obstacle_idx": 0,
+          "clearance": -0.19356080889701843,
+          "point": [
+            1.2193548679351807,
+            0.3350405991077423
+          ]
+        },
+        {
+          "point_idx": 10,
+          "obstacle_idx": 0,
+          "clearance": -0.18801844120025635,
+          "point": [
+            1.3548387289047241,
+            0.3255153298377991
+          ]
+        },
+        {
+          "point_idx": 11,
+          "obstacle_idx": 0,
+          "clearance": -0.15750402212142944,
+          "point": [
+            1.4903225898742676,
+            0.28460201621055603
+          ]
+        },
+        {
+          "point_idx": 12,
+          "obstacle_idx": 0,
+          "clearance": -0.09261134266853333,
+          "point": [
+            1.625806450843811,
+            0.22378186881542206
+          ]
+        }
+      ],
+      "human_hits": [
+        {
+          "point_idx": 12,
+          "obstacle_idx": 0,
+          "clearance": -0.06799271702766418,
+          "point": [
+            0.8458064794540405,
+            0.22378186881542206
+          ]
+        },
+        {
+          "point_idx": 13,
+          "obstacle_idx": 0,
+          "clearance": -0.21827861666679382,
+          "point": [
+            0.981290340423584,
+            0.1580042541027069
+          ]
+        },
+        {
+          "point_idx": 14,
+          "obstacle_idx": 0,
+          "clearance": -0.3635244518518448,
+          "point": [
+            1.1167742013931274,
+            0.09982483088970184
+          ]
+        },
+        {
+          "point_idx": 15,
+          "obstacle_idx": 0,
+          "clearance": -0.47400328144431114,
+          "point": [
+            1.252258062362671,
+            0.05595117434859276
+          ]
+        },
+        {
+          "point_idx": 16,
+          "obstacle_idx": 0,
+          "clearance": -0.38960157334804535,
+          "point": [
+            1.387742042541504,
+            0.027181776240468025
+          ]
+        },
+        {
+          "point_idx": 17,
+          "obstacle_idx": 0,
+          "clearance": -0.2565687298774719,
+          "point": [
+            1.5232257843017578,
+            0.010598458349704742
+          ]
+        },
+        {
+          "point_idx": 18,
+          "obstacle_idx": 0,
+          "clearance": -0.12128463387489319,
+          "point": [
+            1.6587097644805908,
+            0.002139514312148094
+          ]
+        }
+      ],
+      "robot_circle_hits": [
+        {
+          "point_idx": 6,
+          "obstacle_idx": 0,
+          "clearance": -0.05187627673149109,
+          "point": [
+            0.8129032254219055,
+            0.19377490878105164
+          ]
+        },
+        {
+          "point_idx": 7,
+          "obstacle_idx": 0,
+          "clearance": -0.13266107439994812,
+          "point": [
+            0.948387086391449,
+            0.2586655616760254
+          ]
+        },
+        {
+          "point_idx": 8,
+          "obstacle_idx": 0,
+          "clearance": -0.17797362804412842,
+          "point": [
+            1.0838710069656372,
+            0.3103606402873993
+          ]
+        },
+        {
+          "point_idx": 9,
+          "obstacle_idx": 0,
+          "clearance": -0.19356080889701843,
+          "point": [
+            1.2193548679351807,
+            0.3350405991077423
+          ]
+        },
+        {
+          "point_idx": 10,
+          "obstacle_idx": 0,
+          "clearance": -0.18801844120025635,
+          "point": [
+            1.3548387289047241,
+            0.3255153298377991
+          ]
+        },
+        {
+          "point_idx": 11,
+          "obstacle_idx": 0,
+          "clearance": -0.15750402212142944,
+          "point": [
+            1.4903225898742676,
+            0.28460201621055603
+          ]
+        },
+        {
+          "point_idx": 12,
+          "obstacle_idx": 0,
+          "clearance": -0.09261134266853333,
+          "point": [
+            1.625806450843811,
+            0.22378186881542206
+          ]
+        }
+      ],
+      "human_circle_hits": [
+        {
+          "point_idx": 12,
+          "obstacle_idx": 0,
+          "clearance": -0.06799271702766418,
+          "point": [
+            0.8458064794540405,
+            0.22378186881542206
+          ]
+        },
+        {
+          "point_idx": 13,
+          "obstacle_idx": 0,
+          "clearance": -0.21827861666679382,
+          "point": [
+            0.981290340423584,
+            0.1580042541027069
+          ]
+        },
+        {
+          "point_idx": 14,
+          "obstacle_idx": 0,
+          "clearance": -0.3635244518518448,
+          "point": [
+            1.1167742013931274,
+            0.09982483088970184
+          ]
+        },
+        {
+          "point_idx": 15,
+          "obstacle_idx": 0,
+          "clearance": -0.47400328144431114,
+          "point": [
+            1.252258062362671,
+            0.05595117434859276
+          ]
+        },
+        {
+          "point_idx": 16,
+          "obstacle_idx": 0,
+          "clearance": -0.38960157334804535,
+          "point": [
+            1.387742042541504,
+            0.027181776240468025
+          ]
+        },
+        {
+          "point_idx": 17,
+          "obstacle_idx": 0,
+          "clearance": -0.2565687298774719,
+          "point": [
+            1.5232257843017578,
+            0.010598458349704742
+          ]
+        },
+        {
+          "point_idx": 18,
+          "obstacle_idx": 0,
+          "clearance": -0.12128463387489319,
+          "point": [
+            1.6587097644805908,
+            0.002139514312148094
+          ]
+        }
+      ],
+      "robot_segment_hits": [],
+      "human_segment_hits": [],
+      "modified_steps": 0,
+      "mean_shift": 0.0,
+      "max_constraints": 0
+    },
+    "robot_qp": {
+      "robot_collision": false,
+      "human_collision": true,
+      "robot_hits": [],
+      "human_hits": [
+        {
+          "point_idx": 17,
+          "obstacle_idx": 0,
+          "clearance": -0.03597119450569153,
+          "point": [
+            1.1175322532653809,
+            0.47593775391578674
+          ]
+        },
+        {
+          "point_idx": 18,
+          "obstacle_idx": 0,
+          "clearance": -0.06251144409179688,
+          "point": [
+            1.2530162334442139,
+            0.46747881174087524
+          ]
+        },
+        {
+          "point_idx": 19,
+          "obstacle_idx": 0,
+          "clearance": -0.04611167311668396,
+          "point": [
+            1.3884999752044678,
+            0.4636439085006714
+          ]
+        }
+      ],
+      "robot_circle_hits": [],
+      "human_circle_hits": [
+        {
+          "point_idx": 17,
+          "obstacle_idx": 0,
+          "clearance": -0.03597119450569153,
+          "point": [
+            1.1175322532653809,
+            0.47593775391578674
+          ]
+        },
+        {
+          "point_idx": 18,
+          "obstacle_idx": 0,
+          "clearance": -0.06251144409179688,
+          "point": [
+            1.2530162334442139,
+            0.46747881174087524
+          ]
+        },
+        {
+          "point_idx": 19,
+          "obstacle_idx": 0,
+          "clearance": -0.04611167311668396,
+          "point": [
+            1.3884999752044678,
+            0.4636439085006714
+          ]
+        }
+      ],
+      "robot_segment_hits": [],
+      "human_segment_hits": [],
+      "modified_steps": 10,
+      "mean_shift": 0.022473986140422283,
+      "max_constraints": 6
+    },
+    "human_robot_qp": {
+      "robot_collision": false,
+      "human_collision": false,
+      "robot_hits": [],
+      "human_hits": [],
+      "robot_circle_hits": [],
+      "human_circle_hits": [],
+      "robot_segment_hits": [],
+      "human_segment_hits": [],
+      "modified_steps": 14,
+      "mean_shift": 0.027778595190254912,
+      "max_constraints": 12
+    }
+  },
+  "mid360_plugin_raw_points": 10000,
+  "mid360_plugin_observation_bins": 78,
+  "rollout_geometry": {
+    "raw_diffusion": {
+      "front_dx_min": 0.7799999713897705,
+      "front_dx_max": 0.7799999713897705,
+      "lateral_leash_abs_max": 0.0,
+      "robot_final_y": 0.0,
+      "human_final_y": 0.0,
+      "robot_max_y": 0.3350405991077423,
+      "human_max_y": 0.3350405991077423
+    },
+    "robot_qp": {
+      "front_dx_min": 0.779999852180481,
+      "front_dx_max": 0.7800000309944153,
+      "lateral_leash_abs_max": 0.0,
+      "robot_final_y": 0.4653392732143402,
+      "human_final_y": 0.4653392732143402,
+      "robot_max_y": 0.6570561528205872,
+      "human_max_y": 0.6570561528205872
+    },
+    "human_robot_qp": {
+      "front_dx_min": 0.779999852180481,
+      "front_dx_max": 0.7800002098083496,
+      "lateral_leash_abs_max": 0.0,
+      "robot_final_y": 0.6082225441932678,
+      "human_final_y": 0.6082225441932678,
+      "robot_max_y": 0.6570561528205872,
+      "human_max_y": 0.6570561528205872
+    }
+  },
+  "pointcloud_geometry": {
+    "raw_count": 10000,
+    "observation_count": 3859,
+    "raw_upper_wall_points": 1761,
+    "raw_lower_wall_points": 1962,
+    "raw_front_obstacle_points": 608,
+    "observation_upper_wall_points": 1544,
+    "observation_lower_wall_points": 1675,
+    "observation_front_obstacle_points": 608,
+    "raw_bounds_min": [
+      -0.22706951200962067,
+      -0.7900007963180542
+    ],
+    "raw_bounds_max": [
+      3.846076011657715,
+      0.9900062680244446
+    ],
+    "observation_bounds_min": [
+      -0.10686199367046356,
+      -0.7900004982948303
+    ],
+    "observation_bounds_max": [
+      3.846076011657715,
+      0.9900062680244446
+    ]
+  }
+}

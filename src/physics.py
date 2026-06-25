@@ -7,31 +7,19 @@ from typing import Optional
 
 
 @dataclass
-class RobotState:
-    """机器人状态"""
+class State:
     position: np.ndarray = field(default_factory=lambda: np.array([0.0, 0.0]))
     velocity: np.ndarray = field(default_factory=lambda: np.array([0.0, 0.0]))
     heading: float = 0.0  # 朝向角度（弧度）
     
     def copy(self):
-        return RobotState(
+        return State(
             position=self.position.copy(),
             velocity=self.velocity.copy(),
             heading=self.heading
         )
 
 
-@dataclass
-class HumanState:
-    """人类状态"""
-    position: np.ndarray = field(default_factory=lambda: np.array([0.0, 0.0]))
-    velocity: np.ndarray = field(default_factory=lambda: np.array([0.0, 0.0]))
-    
-    def copy(self):
-        return HumanState(
-            position=self.position.copy(),
-            velocity=self.velocity.copy()
-        )
 
 
 class PhysicsEngine:
@@ -44,8 +32,8 @@ class PhysicsEngine:
         turn_speed: float = 1.5,    # 机器人转向速度（弧度/秒，降低以匹配较慢的运动）
         human_drag: float = 0.9,    # 人类阻尼系数
         dt: float = 0.02,           # 时间步长（秒）
-        robot_radius: float = 0.3,  # 机器人半径（米）
-        human_radius: float = 0.3   # 人半径（米）
+        robot_radius: float = 0.1,  # 机器人半径（米）
+        human_radius: float = 0.1   # 人半径（米）
     ):
         self.leash_length = leash_length
         self.robot_speed = robot_speed
@@ -56,19 +44,21 @@ class PhysicsEngine:
         self.human_radius = human_radius
         
         # 状态
-        self.robot = RobotState()
-        self.human = HumanState()
+        self.robot = State()
+        self.human = State()
         
         # 控制输入
         self.forward_input = 0.0  # -1 到 1
         self.turn_input = 0.0     # -1 到 1
+        self.bre = False
+        self.random_angle = 0.0
     
     def reset(self, start_position: Optional[np.ndarray] = None):
         """重置物理状态"""
         if start_position is None:
             start_position = np.array([0.0, 0.0])
         
-        self.robot = RobotState(
+        self.robot = State(
             position=start_position.copy(),
             velocity=np.array([0.0, 0.0]),
             heading=0.0
@@ -76,25 +66,41 @@ class PhysicsEngine:
         
         # 人在机器人后方
         human_offset = np.array([-self.leash_length * 0.8, 0.0])
-        self.human = HumanState(
+        self.human = State(
             position=start_position + human_offset,
-            velocity=np.array([0.0, 0.0])
+            velocity=np.array([0.0, 0.0]),
+            heading=0.0
         )
         
         self.forward_input = 0.0
         self.turn_input = 0.0
+        self.bre = False
     
-    def set_control(self, forward: float, turn: float):
+    def set_control(self, forward: float, turn: float, bre: bool = False):
         """设置控制输入"""
         self.forward_input = np.clip(forward, -1.0, 1.0)
         self.turn_input = np.clip(turn, -1.0, 1.0)
+        if bre != self.bre:
+            magnitude = np.random.uniform(15.0, 25.0)
+            self.random_angle = np.deg2rad(np.random.choice([-magnitude, magnitude]))
+        self.bre = bre
     
     def step(self) -> tuple:
         """
         执行一步物理模拟
         
         Returns:
-            tuple: (robot_state, human_state)
+            tuple: (robot_State, human_State)
+        """
+        
+        return self.model5()
+    
+    def model1(self) -> tuple:
+        """
+        drag model
+        
+        Returns:
+            tuple: (robot_State, human_State)
         """
         # 1. 更新机器人朝向
         self.robot.heading += self.turn_input * self.turn_speed * self.dt
@@ -113,16 +119,153 @@ class PhysicsEngine:
         self.robot.position = self.robot.position + self.robot.velocity * self.dt
         
         # 4. 更新人类位置（绳子牵引）
-        self._update_human()
+        self._human_drag()
         
         return self.robot.copy(), self.human.copy()
     
-    def _update_human(self):
+    def model2(self) -> tuple:
+        """
+        drag model
+        
+        Returns:
+            tuple: (robot_State, human_State)
+        """
+        # 1. 更新机器人朝向
+        self.robot.heading += self.turn_input * self.turn_speed * self.dt
+        
+        # 2. 计算机器人速度（基于朝向）
+        direction = np.array([
+            np.cos(self.robot.heading),
+            np.sin(self.robot.heading)
+        ])
+        target_velocity = direction * self.forward_input * self.robot_speed
+        
+        # 平滑速度变化
+        self.robot.velocity = self.robot.velocity * 0.8 + target_velocity * 0.2
+        
+        # 3. 更新机器人位置
+        self.robot.position = self.robot.position + self.robot.velocity * self.dt
+        
+        # 4. 更新人类位置（绳子牵引）
+        self._human_drag()
+        
+        return self.robot.copy(), self.human.copy()
+    def model3(self) -> tuple:
+        """
+        drag model
+        
+        Returns:
+            tuple: (robot_State, human_State)
+        """
+        # 1. 更新机器人朝向
+        self.robot.heading += self.turn_input * self.turn_speed * self.dt
+        
+        # 2. 计算机器人速度（基于朝向）
+        direction = np.array([
+            np.cos(self.robot.heading),
+            np.sin(self.robot.heading)
+        ])
+        target_velocity = direction * self.forward_input * self.robot_speed
+        
+        # 平滑速度变化
+        self.robot.velocity = self.robot.velocity * 0.8 + target_velocity * 0.2
+        
+        # 3. 更新机器人位置
+        self.robot.position = self.robot.position + self.robot.velocity * self.dt
+        
+        # 4. 更新人类位置（绳子牵引）
+        self._human_rigid_offset()
+        
+        return self.robot.copy(), self.human.copy()
+    def model4(self) -> tuple:
+        """
+        drag model
+        
+        Returns:
+            tuple: (robot_State, human_State)
+        """
+        # 1. 更新机器人朝向
+        self.robot.heading += self.turn_input * self.turn_speed * self.dt
+        
+        # 2. 计算机器人速度（基于朝向）
+        direction = np.array([
+            np.cos(self.robot.heading),
+            np.sin(self.robot.heading)
+        ])
+        target_velocity = direction * self.forward_input * self.robot_speed
+        
+        # 平滑速度变化
+        self.robot.velocity = self.robot.velocity * 0.8 + target_velocity * 0.2
+        
+        # 3. 更新机器人位置
+        self.robot.position = self.robot.position + self.robot.velocity * self.dt
+        
+        # 4. 更新人类位置（绳子牵引）
+        self._human_delayed_harness()
+        
+        return self.robot.copy(), self.human.copy()
+    
+    def model5(self) -> tuple:
+        """
+        drag model
+        
+        Returns:
+            tuple: (robot_State, human_State)
+        """
+        # 1. 更新机器人朝向
+        self.robot.heading += self.turn_input * self.turn_speed * self.dt
+        
+        # 2. 计算机器人速度（基于朝向）
+        direction = np.array([
+            np.cos(self.robot.heading),
+            np.sin(self.robot.heading)
+        ])
+        target_velocity = direction * self.forward_input * self.robot_speed
+        
+        # 平滑速度变化
+        self.robot.velocity = self.robot.velocity * 0.8 + target_velocity * 0.2
+        
+        # 3. 更新机器人位置
+        self.robot.position = self.robot.position + self.robot.velocity * self.dt
+        
+        # 4. 更新人类位置（绳子牵引）
+        self._human_drag()
+        robot_to_human = self.human.position - self.robot.position
+        distance = np.linalg.norm(robot_to_human)
+        if distance > self.leash_length and self.bre:
+            # correction = robot_to_human / distance * (distance - self.leash_length) * 0.5
+            # self.robot.position += correction
+            # self.human.position -= correction
+
+            leash_dir = robot_to_human / distance
+            human_position1 = self.robot.position + leash_dir * self.leash_length
+            robot_position1 = self.robot.position
+
+            human_position2 = self.human.position
+            robot_position2 = self.human.position - leash_dir * self.leash_length
+
+            k = .5
+            self.robot.position = (k*robot_position1 + (1-k)*robot_position2) 
+            self.human.position = (k*human_position1 + (1-k)*human_position2) 
+
+            relative_velocity = self.human.velocity - self.robot.velocity
+            radial_velocity = float(np.dot(relative_velocity, leash_dir))
+            tangential_velocity = relative_velocity - radial_velocity * leash_dir
+            unwanted_velocity = 0.8 * tangential_velocity + max(0.0, radial_velocity) * leash_dir
+            self.robot.velocity += 0.5 * unwanted_velocity
+            self.human.velocity -= 0.5 * unwanted_velocity
+        
+        return self.robot.copy(), self.human.copy()    
+    
+    def _human_drag(self):
         """更新人类位置 - 绳子牵引物理"""
         # 计算机器人到人的向量
         robot_to_human = self.human.position - self.robot.position
         distance = np.linalg.norm(robot_to_human)
-        
+        R = np.array([
+                    [np.cos(self.random_angle), -np.sin(self.random_angle)],
+                    [np.sin(self.random_angle),  np.cos(self.random_angle)],
+                ])
         if distance > 1e-6:
             # 绳子方向（从机器人指向人）
             leash_dir = robot_to_human / distance
@@ -137,9 +280,13 @@ class PhysicsEngine:
                 
                 # 更新人的速度
                 self.human.velocity = self.human.velocity + pull_force * self.dt
+                if self.bre:
+                    self.human.velocity = R @ self.human.velocity
                 
             # 应用阻尼
             self.human.velocity = self.human.velocity * self.human_drag
+            # if self.bre:
+            #     self.human.velocity = self.human.velocity * 0.0
             
             # 更新人的位置
             self.human.position = self.human.position + self.human.velocity * self.dt
@@ -147,9 +294,67 @@ class PhysicsEngine:
             # 硬约束：确保不超过绳子长度
             robot_to_human = self.human.position - self.robot.position
             distance = np.linalg.norm(robot_to_human)
-            if distance > self.leash_length:
+            if distance > self.leash_length and not self.bre:
+            # if distance > self.leash_length:
                 leash_dir = robot_to_human / distance
                 self.human.position = self.robot.position + leash_dir * self.leash_length
+    
+    def _wrap_angle(self, angle: float) -> float:
+        """Wrap angle to [-pi, pi]."""
+        return (angle + np.pi) % (2.0 * np.pi) - np.pi
+
+
+    def _rot2d(self, theta: float) -> np.ndarray:
+        """2D rotation matrix."""
+        c = np.cos(theta)
+        s = np.sin(theta)
+        return np.array([
+            [c, -s],
+            [s,  c],
+        ], dtype=float)
+
+
+    def _human_rigid_offset(self):
+        """Update human pose using fixed rigid robot-human offset."""
+        offset_xy = np.array([-.789359, -.481186], dtype=float)
+        offset_theta = 0.269089
+
+        robot_theta = self.robot.heading
+        robot_R = self._rot2d(robot_theta)
+
+        old_position = self.human.position.copy()
+
+        self.human.position = self.robot.position + robot_R @ offset_xy
+        self.human.velocity = (self.human.position - old_position) / max(self.dt, 1e-6)
+
+        self.human.heading = self._wrap_angle(robot_theta + offset_theta)
+
+
+    def _human_delayed_harness(self):
+        """Update human pose using delayed harness model."""
+        offset_xy = np.array([-0.789359, -0.481186], dtype=float)
+        offset_theta = 0.269089
+        alpha = 0.754387
+
+        robot_theta = self.robot.heading
+        robot_R = self._rot2d(robot_theta)
+
+        old_position = self.human.position.copy()
+        old_heading = self.human.heading
+
+        rigid_target_position = self.robot.position + robot_R @ offset_xy
+        rigid_target_heading = self._wrap_angle(robot_theta + offset_theta)
+
+        self.human.position = (
+            alpha * old_position
+            + (1.0 - alpha) * rigid_target_position
+        )
+        self.human.velocity = (self.human.position - old_position) / max(self.dt, 1e-6)
+
+        heading_error = self._wrap_angle(rigid_target_heading - old_heading)
+        self.human.heading = self._wrap_angle(
+            old_heading + (1.0 - alpha) * heading_error
+        )    
     
     def get_leash_tension(self) -> float:
         """获取绳子张力（0-1）"""

@@ -64,6 +64,7 @@ class DataCollector:
         self.scorer = None
         self.running = True
         self.recording = False
+        self.bre = False
         self.current_path_data = None
         self.robot_trajectory = []
         self.human_trajectory = []
@@ -190,6 +191,8 @@ class DataCollector:
                         self._start_recording()
                 elif event.key == pygame.K_s:
                     self._save_episode()
+                elif event.key == pygame.K_b:
+                    self.bre = not self.bre
                 elif event.key == pygame.K_r:
                     self._reset_position()
                     print("Position reset")
@@ -210,7 +213,7 @@ class DataCollector:
         elif keys[pygame.K_RIGHT]:
             turn = -1.0
 
-        self.physics.set_control(forward, turn)
+        self.physics.set_control(forward, turn, self.bre)
 
     def _update(self):
         robot_state, human_state = self.physics.step()

@@ -18,6 +18,7 @@ import json
 import importlib
 import re
 import sys
+import time
 from collections import deque
 from datetime import datetime
 from pathlib import Path
@@ -45,8 +46,15 @@ if str(DIFFUSION_POLICY_DIR) not in sys.path:
 from src.path_generator import PathGenerator
 from src.physics import PhysicsEngine
 from src.visualizer import Visualizer
+from src.data_storage import DataStorage
+from src.mid360_storage import Mid360DataStorage
 from src.scoring import TrajectoryScorer
 from src.safety_filter import QPSafetyFilter
+from src.compliance_control import (
+    ComplianceControlConfig,
+    apply_bre_compliance_control,
+    apply_interaction_aware_compliance_control,
+)
 from src.mid360_gazebo import (
     Mid360GazeboConfig,
     Mid360GazeboSession,
@@ -104,6 +112,7 @@ def wrap_angle(angle: float) -> float:
 def resolve_device(device: str) -> torch.device:
     if device == "auto":
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # return torch.device("cpu")
     return torch.device(device)
 
 
@@ -199,7 +208,7 @@ class ModelPlanner:
         k_lookahead: Optional[int] = None,
         frame_stride: Optional[int] = None,
         path_length: float = 50.0,
-        corridor_width: float = 2.5,
+        corridor_width: float = 2.1,
         obstacle_radius: float = 0.3,
         leash_length: float = 1.5,
         robot_speed: float = 1.0,
@@ -212,7 +221,9 @@ class ModelPlanner:
         curvature_scale: float = 0.7,
         min_speed_scale: float = 0.25,
         log_path: Optional[Path] = None,
+        eval_path: Optional[Path] = None,
         log_interval: int = 1,
+        collect_enabled: bool = False,
         visualizer: Optional[Visualizer] = None,
         create_visualizer: bool = True,
         collision_behavior: str = "reset",
@@ -596,6 +607,11 @@ class ModelPlanner:
         self.current_path_data = None
         self.running = True
         self.paused = False
+        self.bre = False
+        self.bre_toggle_times = (4, 5, 9, 10, 14, 15, 19, 20, 24, 25, 29, 30)  # Seconds at which to toggle BRE on/off for testing
+        self.bre_toggle_times = (5, 10, 15, 20, 25, 30)  # Seconds at which to toggle BRE on/off for testing
+        self.triggered_bre_toggle_times = set()
+        self.bre_timer_start_frame = None
         self.use_policy = False
         self.collision_pause = False
         self.collision_happened = False
@@ -620,7 +636,21 @@ class ModelPlanner:
         self.prev_robot_pos = None
         self.data_step_idx = 0
         self.log_fp = None
+        self.eval_fp = None
+        self.eval_planning_idx = 0
         self.log_interval = max(1, int(log_interval))
+        self.collect_enabled = bool(collect_enabled)
+        self.recording = False
+        self._last_recorded_cloud_seq = None
+        self.storage = None
+        self.collection_data_dir = FOLLOWDATASET_DIR / "data"
+        if self.collect_enabled:
+            storage_cls = Mid360DataStorage if self.pointcloud_mode == "gazebo" else DataStorage
+            self.storage = storage_cls(base_dir=str(self.collection_data_dir))
+            print(
+                f"Planning collection enabled: {storage_cls.__name__} "
+                f"-> {self.collection_data_dir}"
+            )
 
         self.obs_history = deque(maxlen=self.n_obs_steps)
         
@@ -635,6 +665,7 @@ class ModelPlanner:
         self.cached_control = (0.0, 0.0)
         self.current_action = None
         self.current_delta = None
+        self.latest_nominal_heading_delta = None
         self.turn_gain = float(turn_gain)
         self.curvature_slowdown = bool(curvature_slowdown)
         self.curvature_scale = float(curvature_scale)
@@ -654,6 +685,17 @@ class ModelPlanner:
             "modified_steps": 0,
             "total_steps": 0,
             "mean_shift": 0.0,
+            "constraint_count": 0,
+            "min_clearance": float("inf"),
+        }
+        self.last_compliance_stats = {
+            "applied": False,
+            "safety_applied": False,
+            "modified_steps": 0,
+            "safety_modified_steps": 0,
+            "total_steps": 0,
+            "mean_shift": 0.0,
+            "mean_action_shift": 0.0,
             "constraint_count": 0,
             "min_clearance": float("inf"),
         }
@@ -743,6 +785,12 @@ class ModelPlanner:
                 },
             )
 
+        if eval_path is not None:
+            eval_path = Path(eval_path)
+            eval_path.parent.mkdir(parents=True, exist_ok=True)
+            self.eval_fp = eval_path.open("w", encoding="utf-8")
+            print(f"Planning eval log: {eval_path}")
+
         self._generate_new_path()
 
     def set_path_data(self, path_data: dict, reset: bool = True):
@@ -790,7 +838,12 @@ class ModelPlanner:
 
         self.paused = False
         self.collision_pause = False
+        self.bre = False
+        self.triggered_bre_toggle_times.clear()
+        self.bre_timer_start_frame = None
         self.physics.reset(start)
+        if self.recording:
+            self._stop_recording()
         self._last_mid360_cloud_seq = None
         self._sync_mid360_gazebo_session()
         self.robot_trajectory = []
@@ -816,6 +869,21 @@ class ModelPlanner:
         }
         self._log_event("reset_position", {"robot_pos": self.physics.robot.position.tolist()})
 
+    def _update_timed_bre_toggle(self):
+        if self.bre_timer_start_frame is None:
+            return
+        sim_time = float((self.frame_count - self.bre_timer_start_frame) * self.sim_dt)
+        for toggle_time in self.bre_toggle_times:
+            if toggle_time not in self.triggered_bre_toggle_times and sim_time >= toggle_time:
+                self.bre = not self.bre
+                self._reset_runtime_caches()
+                self.triggered_bre_toggle_times.add(toggle_time)
+                print(f"Timed bre toggle at {toggle_time:.1f}s: bre={self.bre}")
+                self._log_event(
+                    "timed_bre_toggle",
+                    {"toggle_time": float(toggle_time), "bre": bool(self.bre)},
+                )
+
     def _seed_obs_history(self, robot_pos: np.ndarray, human_pos: np.ndarray):
         obs = self._build_obs(robot_pos, human_pos, self.physics.robot.heading)
         self.obs_history.clear()
@@ -833,10 +901,106 @@ class ModelPlanner:
         self.cached_control = (0.0, 0.0)
         self.current_action = None
         self.current_delta = None
+        self.latest_nominal_heading_delta = None
         self.current_speed_scale = 1.0
         self.planned_path = None
         self.nominal_planned_path = None
         self.safe_planned_path = None
+        self.last_compliance_stats = {
+            "applied": False,
+            "safety_applied": False,
+            "modified_steps": 0,
+            "safety_modified_steps": 0,
+            "total_steps": 0,
+            "mean_shift": 0.0,
+            "mean_action_shift": 0.0,
+            "constraint_count": 0,
+            "min_clearance": float("inf"),
+        }
+
+    def _start_recording(self):
+        if self.storage is None:
+            return
+        desired_cls = Mid360DataStorage if self.pointcloud_mode == "gazebo" else DataStorage
+        if type(self.storage) is not desired_cls:
+            self.storage = desired_cls(base_dir=str(self.collection_data_dir))
+        self.recording = True
+        self.storage.start_recording()
+        if self.bre_timer_start_frame is None:
+            self.bre_timer_start_frame = self.frame_count
+            print("Timed bre toggle timer started.")
+        self._last_recorded_cloud_seq = None
+        if self.scorer:
+            self.scorer.reset()
+        print("Recording started...")
+
+    def _stop_recording(self):
+        if self.storage is None:
+            return
+        self.recording = False
+        print(f"Recording paused. Points: {self.storage.get_num_points()}")
+
+    def _record_frame(self, robot_state, human_state):
+        if self.storage is None:
+            return
+        timestamp = float(self.frame_count * self.sim_dt)
+        state = 0 if self.bre else 2
+        if isinstance(self.storage, Mid360DataStorage):
+            if self.mid360_session is None:
+                raise RuntimeError("Mid360 Gazebo session is not running.")
+            cloud = self.mid360_session.get_pointcloud(
+                after_seq=self._last_recorded_cloud_seq,
+                wait_timeout=max(self.sim_dt * 1.2, 0.15),
+            )
+            if cloud is None:
+                cloud = {
+                    "seq": self._last_recorded_cloud_seq or 0,
+                    "stamp": 0.0,
+                    "fields": [],
+                    "points": np.zeros((0, 0), dtype=np.float32),
+                }
+            self._last_recorded_cloud_seq = int(cloud.get("seq", 0))
+            self.storage.record_frame(
+                robot_state.position,
+                human_state.position,
+                timestamp=timestamp,
+                state=state,
+                robot_base_pose=self.mid360_session.get_robot_base_pose(robot_state),
+                human_base_pose=self.mid360_session.get_human_base_pose(human_state),
+                mid360_pose=self.mid360_session.get_mid360_pose(robot_state),
+                point_cloud=np.asarray(cloud.get("points", np.zeros((0, 0), dtype=np.float32))),
+                point_cloud_timestamp=float(cloud.get("stamp", 0.0)),
+                point_cloud_fields=list(cloud.get("fields", [])),
+            )
+        else:
+            self.storage.record_frame(
+                robot_state.position,
+                human_state.position,
+                timestamp=timestamp,
+                state=state,
+            )
+
+    def _save_episode(self):
+        if self.storage is None:
+            return
+        if self.storage.get_num_points() == 0:
+            print("No data to save!")
+            return
+        scores = self.scorer.get_scores() if self.scorer else {}
+        extra_metadata = {"scores": scores, "source": "planning"}
+        if self.mid360_session is not None:
+            extra_metadata.update(self.mid360_session.metadata())
+        episode_dir = self.storage.save_episode(
+            reference_path=self.current_path_data["path"],
+            start_pos=self.current_path_data["start"],
+            end_pos=self.current_path_data["end"],
+            obstacles=self.current_path_data.get("obstacles"),
+            segment_obstacles=self.current_path_data.get("segment_obstacles"),
+            extra_metadata=extra_metadata,
+        )
+        print(f"Saved planning episode: {episode_dir}")
+        self.recording = False
+        self.storage.clear()
 
     def _supported_pointcloud_modes(self) -> list[str]:
         if self.observation_mode == "mid360":
@@ -1029,6 +1193,176 @@ class ModelPlanner:
             payload.update(extra)
         self.log_fp.write(json.dumps(payload, ensure_ascii=True) + "\n")
         self.log_fp.flush()
+
+    def _synchronize_timing_device(self):
+        if self.device.type == "cuda":
+            torch.cuda.synchronize(self.device)
+
+    def _run_eval_safety_variant(
+        self,
+        action_seq: np.ndarray,
+        safety_mode: str,
+    ) -> tuple[np.ndarray, list[dict], dict, float]:
+        saved_mode = self.safety_mode
+        saved_stats = copy.deepcopy(self.last_safety_stats)
+        saved_rng_state = np.random.get_state()
+        try:
+            self.safety_mode = normalize_safety_mode(safety_mode)
+            start = time.perf_counter()
+            if self.action_mode == "forward_heading":
+                _nominal_deltas, safe_deltas, safety_infos = (
+                    self._apply_forward_heading_safety_filter(action_seq)
+                )
+            else:
+                safe_actions = self._apply_safety_filter(action_seq)
+                safe_deltas = self._action_seq_to_nominal_delta_seq(safe_actions)
+                safety_infos = []
+            elapsed_ms = (time.perf_counter() - start) * 1000.0
+            stats = copy.deepcopy(self.last_safety_stats)
+        finally:
+            self.safety_mode = saved_mode
+            self.last_safety_stats = saved_stats
+            np.random.set_state(saved_rng_state)
+        return safe_deltas, safety_infos, stats, elapsed_ms
+
+    def _eval_paths_from_deltas(
+        self,
+        delta_seq: np.ndarray,
+    ) -> tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+        saved_rng_state = np.random.get_state()
+        try:
+            sim = copy.deepcopy(self.physics)
+            robot_points: list[np.ndarray] = []
+            human_points: list[np.ndarray] = []
+            for delta in np.asarray(delta_seq, dtype=np.float32):
+                forward, turn, _speed_scale = self._delta_to_safe_control(
+                    delta,
+                    sim.robot.heading,
+                    dt=self.data_dt,
+                )
+                sim.set_control(forward, turn, self.bre)
+                for _ in range(int(self.frame_stride)):
+                    robot_state, human_state = sim.step()
+                    robot_points.append(robot_state.position.copy())
+                    human_points.append(human_state.position.copy())
+            robot_path = np.stack(robot_points, axis=0) if robot_points else None
+            human_path = np.stack(human_points, axis=0) if human_points else None
+            return robot_path, human_path
+        finally:
+            np.random.set_state(saved_rng_state)
+
+    def _serialize_eval_safety_steps(self, safety_infos: list[dict]) -> list[dict]:
+        rows = []
+        for info in safety_infos:
+            min_clearance = float(info.get("min_clearance", float("inf")))
+            rows.append(
+                {
+                    "modified": bool(info.get("modified", False)),
+                    "shift": round(float(info.get("shift", 0.0)), 6),
+                    "constraint_count": int(info.get("constraint_count", 0)),
+                    "min_clearance": (
+                        round(min_clearance, 6) if np.isfinite(min_clearance) else "inf"
+                    ),
+                    "backoff_applied": bool(info.get("backoff_applied", False)),
+                    "resolution_stage": str(info.get("resolution_stage", "none")),
+                }
+            )
+        return rows
+
+    def _serialize_eval_safety_stats(self, stats: dict) -> dict:
+        min_clearance = float(stats.get("min_clearance", float("inf")))
+        return {
+            "modified_steps": int(stats.get("modified_steps", 0)),
+            "total_steps": int(stats.get("total_steps", 0)),
+            "mean_shift": round(float(stats.get("mean_shift", 0.0)), 6),
+            "constraint_count": int(stats.get("constraint_count", 0)),
+            "min_clearance": (
+                round(min_clearance, 6) if np.isfinite(min_clearance) else "inf"
+            ),
+        }
+
+    def _write_planning_eval(self, action_seq: np.ndarray, diffusion_time_ms: float):
+        if self.eval_fp is None:
+            return
+
+        action_seq = np.asarray(action_seq, dtype=np.float32)
+        saved_rng_state = np.random.get_state()
+        try:
+            origin_deltas = self._action_seq_to_nominal_delta_seq(action_seq)
+        finally:
+            np.random.set_state(saved_rng_state)
+        origin_robot_path, origin_human_path = self._eval_paths_from_deltas(origin_deltas)
+
+        robot_deltas, robot_infos, robot_stats, robot_qp_time_ms = (
+            self._run_eval_safety_variant(action_seq, "robot_qp")
+        )
+        robot_safe_robot_path, robot_safe_human_path = self._eval_paths_from_deltas(robot_deltas)
+
+        (
+            human_robot_deltas,
+            human_robot_infos,
+            human_robot_stats,
+            human_robot_qp_time_ms,
+        ) = self._run_eval_safety_variant(action_seq, "human_robot_qp")
+        human_robot_safe_robot_path, human_robot_safe_human_path = (
+            self._eval_paths_from_deltas(human_robot_deltas)
+        )
+
+        diffusion_time_ms = float(diffusion_time_ms)
+        obstacles = self.current_path_data.get("obstacles") if self.current_path_data else None
+        segments = self.current_path_data.get("segment_obstacles") if self.current_path_data else None
+        payload = {
+            "event": "planning_eval",
+            "planning_index": int(self.eval_planning_idx),
+            "frame": int(self.frame_count),
+            "time_sec": float(self.frame_count * self.sim_dt),
+            "data_step": int(self.data_step_idx),
+            "data_time_sec": float(self.data_step_idx * self.data_dt),
+            "action_mode": self.action_mode,
+            "executed_safety_mode": self.safety_mode,
+            "robot_pos": self._rounded_list(self.physics.robot.position, decimals=6),
+            "human_pos": self._rounded_list(self.physics.human.position, decimals=6),
+            "robot_heading": round(float(self.physics.robot.heading), 6),
+            "robot_radius": round(float(self.physics.robot_radius), 6),
+            "human_radius": round(float(self.physics.human_radius), 6),
+            "obstacles": self._serialize_obstacles(obstacles, decimals=6),
+            "segment_obstacles": self._serialize_segments(segments, decimals=6),
+            "origin_planning": {
+                "diffusion_time_ms": round(diffusion_time_ms, 3),
+                "qp_time_ms": 0.0,
+                "total_time_ms": round(diffusion_time_ms, 3),
+                "action_seq": self._rounded_list(action_seq, decimals=6),
+                "delta_seq": self._rounded_list(origin_deltas, decimals=6),
+                "path": self._rounded_list(origin_robot_path, decimals=6),
+                "robot_path": self._rounded_list(origin_robot_path, decimals=6),
+                "human_path": self._rounded_list(origin_human_path, decimals=6),
+            },
+            "robot_safe_planning": {
+                "diffusion_time_ms": round(diffusion_time_ms, 3),
+                "qp_time_ms": round(robot_qp_time_ms, 3),
+                "total_time_ms": round(diffusion_time_ms + robot_qp_time_ms, 3),
+                "delta_seq": self._rounded_list(robot_deltas, decimals=6),
+                "path": self._rounded_list(robot_safe_robot_path, decimals=6),
+                "robot_path": self._rounded_list(robot_safe_robot_path, decimals=6),
+                "human_path": self._rounded_list(robot_safe_human_path, decimals=6),
+                "safety_summary": self._serialize_eval_safety_stats(robot_stats),
+                "qp_steps": self._serialize_eval_safety_steps(robot_infos),
+            },
+            "human_robot_safe_planning": {
+                "diffusion_time_ms": round(diffusion_time_ms, 3),
+                "qp_time_ms": round(human_robot_qp_time_ms, 3),
+                "total_time_ms": round(diffusion_time_ms + human_robot_qp_time_ms, 3),
+                "delta_seq": self._rounded_list(human_robot_deltas, decimals=6),
+                "path": self._rounded_list(human_robot_safe_robot_path, decimals=6),
+                "robot_path": self._rounded_list(human_robot_safe_robot_path, decimals=6),
+                "human_path": self._rounded_list(human_robot_safe_human_path, decimals=6),
+                "safety_summary": self._serialize_eval_safety_stats(human_robot_stats),
+                "qp_steps": self._serialize_eval_safety_steps(human_robot_infos),
+            },
+        }
+        self.eval_fp.write(json.dumps(payload, ensure_ascii=True) + "\n")
+        self.eval_fp.flush()
+        self.eval_planning_idx += 1
 
     def _log_step(
         self,
@@ -1286,7 +1620,27 @@ class ModelPlanner:
                 if event.key == pygame.K_ESCAPE:
                     self.running = False
                 elif event.key == pygame.K_SPACE:
-                    self.paused = not self.paused
+                    if self.collect_enabled:
+                        if self.recording:
+                            self._stop_recording()
+                        else:
+                            self._start_recording()
+                    else:
+                        self.paused = not self.paused
+                elif event.key == pygame.K_s:
+                    if self.collect_enabled:
+                        self._save_episode()
+                elif event.key == pygame.K_b:
+                    self.bre = not self.bre
+                    self._reset_runtime_caches()
+                    print(f"Interaction state: {self._current_interaction_label()} (bre={self.bre})")
+                    self._log_event(
+                        "manual_bre_toggle",
+                        {
+                            "bre": bool(self.bre),
+                            "interaction_label": self._current_interaction_label(),
+                        },
+                    )
                 elif event.key == pygame.K_r:
                     self._reset_position()
                     print("Position reset")
@@ -1331,6 +1685,195 @@ class ModelPlanner:
         action_seq = action_dict["action"].detach().cpu().numpy()[0]
         return action_seq.astype(np.float32)
 
+    def _path_heading_delta(self, path: Optional[np.ndarray]) -> Optional[float]:
+        if path is None or len(path) < 2:
+            return None
+        path = np.asarray(path, dtype=np.float32)
+        for idx in range(len(path) - 1, 0, -1):
+            delta = path[idx] - path[idx - 1]
+            if float(np.linalg.norm(delta)) > 1e-6:
+                final_heading = float(np.arctan2(delta[1], delta[0]))
+                return float(wrap_angle(final_heading - self.physics.robot.heading))
+        return None
+
+    def _apply_bre_compliance_control(
+        self,
+        action_seq: np.ndarray,
+        obstacles: Optional[np.ndarray] = None,
+        segment_obstacles: Optional[np.ndarray] = None,
+    ) -> np.ndarray:
+        if obstacles is None and self.current_path_data is not None:
+            obstacles = self.current_path_data.get("obstacles")
+        if segment_obstacles is None and self.current_path_data is not None:
+            segment_obstacles = self.current_path_data.get("segment_obstacles")
+
+        result = apply_bre_compliance_control(
+            action_seq=action_seq,
+            engine=self.physics,
+            config=ComplianceControlConfig(
+                data_dt=float(self.data_dt),
+                sim_dt=float(self.sim_dt),
+                frame_stride=int(self.frame_stride),
+                turn_gain=float(self.turn_gain),
+                safety_mode=self.safety_mode,
+                curvature_slowdown=bool(self.curvature_slowdown),
+                curvature_scale=float(self.curvature_scale),
+                min_speed_scale=float(self.min_speed_scale),
+                backoff_scales=tuple(float(v) for v in self.safety_backoff_scales),
+                stop_clearance=float(self.safety_stop_clearance),
+            ),
+            safety_filter=self.safety_filter,
+            obstacles=obstacles,
+            segment_obstacles=segment_obstacles,
+            bre=bool(self.bre),
+        )
+        self.last_compliance_stats = copy.deepcopy(result.stats)
+        return result.actions
+
+    def _current_interaction_label(self) -> str:
+        return "leash" if self.bre else "guide"
+
+    def _reset_compliance_stats_for_labels(self, labels: np.ndarray) -> None:
+        labels = np.asarray(labels, dtype=object).reshape(-1)
+        state_counts: dict[str, int] = {}
+        for label in labels:
+            key = str(label).strip().lower()
+            state_counts[key] = state_counts.get(key, 0) + 1
+        compliance_steps = int(
+            sum(count for label, count in state_counts.items() if label in ("leash", "tether"))
+        )
+        self.last_compliance_stats = {
+            "applied": True,
+            "mode": "interaction_aware",
+            "current_label": self._current_interaction_label(),
+            "safety_applied": False,
+            "modified_steps": 0,
+            "safety_modified_steps": 0,
+            "total_steps": int(len(labels)),
+            "compliance_steps": int(compliance_steps),
+            "guide_steps": int(len(labels) - compliance_steps),
+            "bre_steps": int(compliance_steps),
+            "state_counts": state_counts,
+            "mean_shift": 0.0,
+            "mean_action_shift": 0.0,
+            "constraint_count": 0,
+            "min_clearance": float("inf"),
+        }
+
+    def _interaction_labels_for_action_seq(self, action_count: int) -> np.ndarray:
+        """Predict guide/leash labels over the cached action horizon."""
+        action_count = max(0, int(action_count))
+        labels = np.full(
+            (action_count,),
+            self._current_interaction_label(),
+            dtype=object,
+        )
+        if action_count == 0 or self.bre_timer_start_frame is None:
+            return labels
+
+        current_time = float((self.frame_count - self.bre_timer_start_frame) * self.sim_dt)
+        upcoming_toggles = sorted(
+            float(t)
+            for t in self.bre_toggle_times
+            if t not in self.triggered_bre_toggle_times and float(t) >= current_time
+        )
+        if not upcoming_toggles:
+            return labels
+
+        state = bool(self.bre)
+        toggle_idx = 0
+        for action_idx in range(action_count):
+            action_time = current_time + float(action_idx) * float(self.data_dt)
+            while (
+                toggle_idx < len(upcoming_toggles)
+                and upcoming_toggles[toggle_idx] <= action_time + 1e-9
+            ):
+                state = not state
+                toggle_idx += 1
+            labels[action_idx] = "leash" if state else "guide"
+        return labels
+
+    def _apply_interaction_aware_compliance_control(
+        self,
+        action_seq: np.ndarray,
+        obstacles: Optional[np.ndarray] = None,
+        segment_obstacles: Optional[np.ndarray] = None,
+    ) -> np.ndarray:
+        if obstacles is None and self.current_path_data is not None:
+            obstacles = self.current_path_data.get("obstacles")
+        if segment_obstacles is None and self.current_path_data is not None:
+            segment_obstacles = self.current_path_data.get("segment_obstacles")
+
+        labels = self._interaction_labels_for_action_seq(len(action_seq))
+        compliance_mask = np.isin(labels.astype(str), np.array(["leash", "tether"], dtype=object))
+        if not np.any(compliance_mask):
+            self._reset_compliance_stats_for_labels(labels)
+            return np.asarray(action_seq, dtype=np.float32).copy()
+
+        result = apply_interaction_aware_compliance_control(
+            action_seq=action_seq,
+            interaction_labels=labels,
+            engine=self.physics,
+            config=ComplianceControlConfig(
+                data_dt=float(self.data_dt),
+                sim_dt=float(self.sim_dt),
+                frame_stride=int(self.frame_stride),
+                turn_gain=float(self.turn_gain),
+                safety_mode=self.safety_mode,
+                curvature_slowdown=bool(self.curvature_slowdown),
+                curvature_scale=float(self.curvature_scale),
+                min_speed_scale=float(self.min_speed_scale),
+                backoff_scales=tuple(float(v) for v in self.safety_backoff_scales),
+                stop_clearance=float(self.safety_stop_clearance),
+            ),
+            safety_filter=self.safety_filter,
+            obstacles=obstacles,
+            segment_obstacles=segment_obstacles,
+            bre=bool(self.bre),
+            bre_sequence=compliance_mask,
+        )
+        self.last_compliance_stats = copy.deepcopy(result.stats)
+        self.last_compliance_stats["mode"] = "interaction_aware"
+        self.last_compliance_stats["current_label"] = self._current_interaction_label()
+        return result.actions
+
+    def _cut_action(self, action_seq: np.ndarray) -> np.ndarray:
+        """Stop before the planned robot velocity points behind the human->robot link."""
+        action_seq = np.asarray(action_seq, dtype=np.float32)
+        if action_seq.ndim != 2 or len(action_seq) == 0:
+            return action_seq
+
+        sim = copy.deepcopy(self.physics)
+        keep_count = len(action_seq)
+        for idx, action in enumerate(action_seq):
+            _delta, forward, turn, _speed_scale = self._action_to_execution(
+                action,
+                sim.robot.position,
+                sim.robot.heading,
+            )
+            sim.set_control(forward, turn, self.bre)
+            invalid = False
+            for _ in range(int(self.frame_stride)):
+                sim.step()
+                robot_vel = sim.robot.velocity
+                link = sim.robot.position - sim.human.position
+                link_angle = float(np.arctan2(link[1], link[0]))
+                cos_a = float(np.cos(link_angle))
+                sin_a = float(np.sin(link_angle))
+                vel_local_x = cos_a * float(robot_vel[0]) + sin_a * float(robot_vel[1])
+                if float(np.linalg.norm(link)) > 1e-6 and vel_local_x < 0.0:
+                    invalid = True
+                    break
+            if invalid:
+                keep_count = idx
+                break
+
+        if keep_count == len(action_seq):
+            return action_seq
+        if keep_count == 0:
+            return np.zeros_like(action_seq[:1])
+        return action_seq[:keep_count].copy()
+
     def _build_obs(
         self, robot_pos: np.ndarray, human_pos: np.ndarray, heading: float
     ) -> np.ndarray:
@@ -1341,7 +1884,6 @@ class ModelPlanner:
             sin_h = float(np.sin(heading))
             hx = cos_h * human_rel[0] + sin_h * human_rel[1]
             hy = -sin_h * human_rel[0] + cos_h * human_rel[1]
-
             if self.robot_state in ("vel", "velocity"):
                 if self.prev_robot_pos is None:
                     vel_world = np.zeros((2,), dtype=np.float32)
@@ -1364,7 +1906,7 @@ class ModelPlanner:
             else np.zeros((self.n_lookahead * 2,), dtype=np.float32)
         )
         if self.observation_mode == "mid360":
-            obs_features = self._build_mid360_features(robot_pos, heading)
+            obs_features = self._build_mid360_features(robot_pos, human_pos, heading)
         else:
             if self.pointcloud_mode in ("vector_map", "gazebo"):
                 self._update_mid360_pointcloud(robot_pos, heading)
@@ -1426,7 +1968,55 @@ class ModelPlanner:
         self.current_mid360_points_world = local_xy @ rot.T + robot_pos.astype(np.float32)
         return local_xy
 
-    def _build_mid360_features(self, robot_pos: np.ndarray, heading: float) -> np.ndarray:
+    def _human_cloud_keep_mask(
+        self,
+        local_xy: np.ndarray,
+        robot_pos: np.ndarray,
+        human_pos: np.ndarray,
+        heading: float,
+    ) -> np.ndarray:
+        human_rel = np.asarray(human_pos, dtype=np.float32) - np.asarray(robot_pos, dtype=np.float32)
+        cos_h = float(np.cos(heading))
+        sin_h = float(np.sin(heading))
+        human_local = np.array(
+            [
+                cos_h * human_rel[0] + sin_h * human_rel[1],
+                -sin_h * human_rel[0] + cos_h * human_rel[1],
+            ],
+            dtype=np.float32,
+        )
+        distance = np.linalg.norm(local_xy[:, :2] - human_local[None, :], axis=1)
+        return distance > float(self.physics.human_radius)
+
+    def _filter_gazebo_cloud_near_human(
+        self,
+        frame: np.ndarray,
+        field_names: list[str],
+        mid360_pose: np.ndarray,
+        human_pos: np.ndarray,
+    ) -> np.ndarray:
+        indices = {str(name): idx for idx, name in enumerate(field_names)}
+        if len(frame) == 0 or "x" not in indices or "y" not in indices:
+            return frame
+        local_xyz = np.zeros((len(frame), 3), dtype=np.float32)
+        local_xyz[:, 0] = frame[:, indices["x"]]
+        local_xyz[:, 1] = frame[:, indices["y"]]
+        if "z" in indices:
+            local_xyz[:, 2] = frame[:, indices["z"]]
+        rot = Rotation.from_quat(mid360_pose[3:7]).as_matrix().astype(np.float32)
+        world_xy = (local_xyz @ rot.T + np.asarray(mid360_pose[:3], dtype=np.float32))[:, :2]
+        distance = np.linalg.norm(
+            world_xy - np.asarray(human_pos, dtype=np.float32)[None, :],
+            axis=1,
+        )
+        return frame[distance > float(self.physics.human_radius)]
+
+    def _build_mid360_features(
+        self,
+        robot_pos: np.ndarray,
+        human_pos: np.ndarray,
+        heading: float,
+    ) -> np.ndarray:
         if self.current_path_data is None or self.mid360_obs_config is None:
             self.current_mid360_points_world = None
             return np.zeros((self.lidar_num_bins,), dtype=np.float32)
@@ -1441,6 +2031,13 @@ class ModelPlanner:
                     dtype=np.float32,
                 )
             frame, field_names, mid360_pose = cloud
+            frame = self._filter_gazebo_cloud_near_human(
+                frame,
+                field_names,
+                mid360_pose,
+                human_pos,
+            )
+            cloud = (frame, field_names, mid360_pose)
             self._update_mid360_pointcloud_from_gazebo(
                 robot_pos,
                 heading,
@@ -1461,6 +2058,14 @@ class ModelPlanner:
                 dtype=np.float32,
             )
         frame = self._simulate_mid360_frame(robot_pos, heading)
+        if frame is not None and len(frame) > 0:
+            keep = self._human_cloud_keep_mask(
+                np.asarray(frame[:, :2], dtype=np.float32),
+                robot_pos,
+                human_pos,
+                heading,
+            )
+            frame = frame[keep]
         local_xy = self._update_mid360_pointcloud(robot_pos, heading, frame=frame)
         if frame is None or len(frame) == 0:
             return np.full(
@@ -2065,7 +2670,7 @@ class ModelPlanner:
             engine.robot.position,
             engine.robot.heading,
         )
-        engine.set_control(forward, turn)
+        engine.set_control(forward, turn, self.bre)
         points: list[np.ndarray] = []
         for _ in range(int(self.frame_stride)):
             robot_state, _human_state = engine.step()
@@ -2523,7 +3128,7 @@ class ModelPlanner:
             engine.robot.heading,
             dt=self.data_dt,
         )
-        engine.set_control(forward, turn)
+        engine.set_control(forward, turn, self.bre)
         points: list[np.ndarray] = []
         for _ in range(int(self.frame_stride)):
             robot_state, _human_state = engine.step()
@@ -2625,8 +3230,10 @@ class ModelPlanner:
         self.collision_info = None
         if self.paused or self.collision_pause:
             # Freeze simulation state while paused (manual or auto-paused).
-            self.physics.set_control(0.0, 0.0)
+            self.physics.set_control(0.0, 0.0, False)
             return self.physics.robot.copy(), self.physics.human.copy()
+
+        self._update_timed_bre_toggle()
 
         forward = 0.0
         turn = 0.0
@@ -2642,7 +3249,35 @@ class ModelPlanner:
                         self.cached_action_idx >= len(self.cached_action_seq) or
                         self.frames_since_inference >= self.inference_interval):
                         # Run inference
+                        diffusion_start = None
+                        if self.eval_fp is not None:
+                            self._synchronize_timing_device()
+                            diffusion_start = time.perf_counter()
                         action_seq = self._predict_action()
+                        diffusion_time_ms = 0.0
+                        if diffusion_start is not None:
+                            self._synchronize_timing_device()
+                            diffusion_time_ms = (time.perf_counter() - diffusion_start) * 1000.0
+                        raw_nominal_delta_seq = self._action_seq_to_nominal_delta_seq(action_seq)
+                        raw_nominal_path = self._deltas_to_path(
+                            raw_nominal_delta_seq,
+                            protect_robot=False,
+                            protect_human=False,
+                        )
+                        raw_heading_delta = self._path_heading_delta(raw_nominal_path)
+                        self._write_planning_eval(action_seq, diffusion_time_ms)
+                        if self.action_mode == "forward_heading":
+                            obstacles = self.current_path_data.get("obstacles") if self.current_path_data else None
+                            segments = (
+                                self.current_path_data.get("segment_obstacles")
+                                if self.current_path_data
+                                else None
+                            )
+                            action_seq = self._apply_interaction_aware_compliance_control(
+                                action_seq,
+                                obstacles=obstacles,
+                                segment_obstacles=segments,
+                            )
                         self.cached_action_seq = action_seq
                         self.cached_action_idx = 0
                         self.frames_since_inference = 0
@@ -2675,6 +3310,10 @@ class ModelPlanner:
                             self.safe_planned_path = None
                             self.planned_path = self.nominal_planned_path
 
+                        self.latest_nominal_heading_delta = self._path_heading_delta(
+                            self.nominal_planned_path
+                        )
+
                         if self.cached_action_seq is not None and len(self.cached_action_seq) > 0:
                             norms = np.linalg.norm(self.cached_action_seq, axis=1)
                             raw_heading = action_seq[:, 1] if action_seq.shape[1] > 1 else np.zeros(
@@ -2700,6 +3339,25 @@ class ModelPlanner:
                                 ),
                                 "safety_mean_shift": float(
                                     self.last_safety_stats.get("mean_shift", 0.0)
+                                ),
+                                "interaction_label": self._current_interaction_label(),
+                                "compliance_mode": str(
+                                    self.last_compliance_stats.get("mode", "interaction_aware")
+                                ),
+                                "compliance_steps": int(
+                                    self.last_compliance_stats.get("compliance_steps", 0)
+                                ),
+                                "compliance_guide_steps": int(
+                                    self.last_compliance_stats.get("guide_steps", 0)
+                                ),
+                                "compliance_modified_steps": int(
+                                    self.last_compliance_stats.get("modified_steps", 0)
+                                ),
+                                "compliance_mean_action_shift": float(
+                                    self.last_compliance_stats.get("mean_action_shift", 0.0)
+                                ),
+                                "compliance_state_counts": dict(
+                                    self.last_compliance_stats.get("state_counts", {})
                                 ),
                             }
                             if self.cached_safe_delta_seq is not None:
@@ -2909,7 +3567,7 @@ class ModelPlanner:
                 self.current_delta = None
                 self.current_speed_scale = 1.0
 
-        self.physics.set_control(forward, turn)
+        self.physics.set_control(forward, turn, self.bre)
         robot_state, human_state = self.physics.step()
         self._sync_mid360_gazebo_session()
 
@@ -2931,7 +3589,7 @@ class ModelPlanner:
                     s_end = float(path_s[-1])
                     if s_human >= s_end - 1e-3:
                         self.paused = True
-                        self.physics.set_control(0.0, 0.0)
+                        self.physics.set_control(0.0, 0.0, False)
                         self._log_event(
                             "goal_reached",
                             {
@@ -2944,6 +3602,8 @@ class ModelPlanner:
 
         self.robot_trajectory.append(robot_state.position.copy())
         self.human_trajectory.append(human_state.position.copy())
+        if self.recording:
+            self._record_frame(robot_state, human_state)
 
         max_trail = 5000
         if len(self.robot_trajectory) > max_trail:
@@ -2991,7 +3651,7 @@ class ModelPlanner:
             if self.collision_behavior == "pause":
                 print(f"Collision detected ({who}, {label} {idx}), pausing at collision.")
                 self.collision_pause = True
-                self.physics.set_control(0.0, 0.0)
+                self.physics.set_control(0.0, 0.0, False)
                 return True
             print(f"Collision detected ({who}, {label} {idx}), resetting.")
             self._reset_position()
@@ -3003,6 +3663,7 @@ class ModelPlanner:
         mode = "policy" if self.use_policy else "manual"
         safety_label = "diffusion" if self.safety_mode == "off" else self.safety_mode
         mode += f" [{safety_label}]"
+        mode += f" [{self._current_interaction_label()}]"
         if self.paused:
             mode += " (paused)"
         elif self.collision_pause:
@@ -3013,18 +3674,24 @@ class ModelPlanner:
             "path_length": self.current_path_data["length"] if self.current_path_data else 0,
             "robot_x": robot_state.position[0],
             "robot_y": robot_state.position[1],
-            "num_points": self.frame_count,
-            "recording": False,
+            "num_points": self.storage.get_num_points() if self.storage is not None else self.frame_count,
+            "recording": self.recording,
             "scores": scores,
             "mode": mode,
             "safety_mode": self.safety_mode,
             "pointcloud_mode": self.pointcloud_mode,
+            "interaction_label": self._current_interaction_label(),
+            "compliance_steps": int(self.last_compliance_stats.get("compliance_steps", 0)),
+            "compliance_total_steps": int(self.last_compliance_stats.get("total_steps", 0)),
             "robot_radius": self.physics.robot_radius,
             "human_radius": self.physics.human_radius,
+            "nominal_heading_delta": self.latest_nominal_heading_delta,
             "controls": [
                 "P: Policy/Manual",
                 "C: PointCloud",
-                "SPACE: Pause",
+                "SPACE: Record/Pause" if self.collect_enabled else "SPACE: Pause",
+                "S: Save episode" if self.collect_enabled else "M: Safety mode",
+                "B: Guide/Tether",
                 "R: Reset",
                 "N: New Path",
                 "Arrows: Manual control",
@@ -3108,6 +3775,8 @@ class ModelPlanner:
                 },
             )
             self.log_fp.close()
+        if self.eval_fp is not None:
+            self.eval_fp.close()
         print("Program exit")
 
 
@@ -3219,8 +3888,20 @@ def main():
         help="Log every N frames (default: 1).",
     )
     parser.add_argument(
+        "-e",
+        "--eval",
+        action="store_true",
+        help="Write each origin/robot-safe/human-robot-safe planning result and timing to JSONL.",
+    )
+    parser.add_argument(
+        "-c",
+        "--collect",
+        action="store_true",
+        help="Enable collect-style episode recording. SPACE toggles recording; S saves.",
+    )
+    parser.add_argument(
         "--safety-mode",
-        default="robot_qp",
+        default="human_robot_qp",
         help="off | robot_qp | human_robot_qp. Apply online safety filtering before execution.",
     )
     parser.add_argument(
@@ -3283,6 +3964,7 @@ def main():
                 print(f"  {ckpt}")
         print("\nContinuing with manual control...")
 
+    run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     planner = ModelPlanner(
         checkpoint_path=checkpoint_path,
         device=args.device,
@@ -3305,8 +3987,14 @@ def main():
         curvature_slowdown=not args.no_curvature_slowdown,
         curvature_scale=args.curvature_scale,
         min_speed_scale=args.min_speed_scale,
-        log_path=None if args.no_log else args.log_dir / f"planning_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl",
+        log_path=None if args.no_log else args.log_dir / f"planning_{run_timestamp}.jsonl",
+        eval_path=(
+            args.log_dir / f"planning_eval_{run_timestamp}.jsonl"
+            if args.eval
+            else None
+        ),
         log_interval=args.log_interval,
+        collect_enabled=args.collect,
         safety_mode=args.safety_mode,
         safety_margin=args.safety_margin,
         safety_alpha=args.safety_alpha,

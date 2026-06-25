@@ -21,6 +21,7 @@ class DataStorage:
         self.robot_trajectory = []
         self.human_trajectory = []
         self.timestamps = []
+        self.states = []
         self.start_time = None
     
     def start_recording(self):
@@ -28,13 +29,15 @@ class DataStorage:
         self.robot_trajectory = []
         self.human_trajectory = []
         self.timestamps = []
+        self.states = []
         self.start_time = datetime.now()
     
     def record_frame(
         self,
         robot_pos: np.ndarray,
         human_pos: np.ndarray,
-        timestamp: Optional[float] = None
+        timestamp: Optional[float] = None,
+        state: int = 2,
     ):
         """记录一帧数据"""
         if timestamp is None:
@@ -43,6 +46,7 @@ class DataStorage:
         self.robot_trajectory.append(robot_pos.copy())
         self.human_trajectory.append(human_pos.copy())
         self.timestamps.append(timestamp)
+        self.states.append(int(state))
     
     def save_episode(
         self,
@@ -97,6 +101,7 @@ class DataStorage:
         robot_arr = np.array(self.robot_trajectory)
         human_arr = np.array(self.human_trajectory)
         time_arr = np.array(self.timestamps)
+        state_arr = np.asarray(self.states, dtype=np.int8)
         
         # 创建Zarr存储
         store = zarr.DirectoryStore(path)
@@ -120,6 +125,12 @@ class DataStorage:
             data=time_arr,
             chunks=(1000,),
             dtype='float64'
+        )
+        root.create_dataset(
+            'state',
+            data=state_arr,
+            chunks=(1000,),
+            dtype='int8'
         )
         
         # 添加属性
@@ -185,6 +196,7 @@ class DataStorage:
         self.robot_trajectory = []
         self.human_trajectory = []
         self.timestamps = []
+        self.states = []
         self.start_time = None
     
     def get_num_points(self) -> int:
@@ -202,7 +214,10 @@ class DataStorage:
         data = {
             'robot_path': root['robot_path'][:],
             'human_path': root['human_path'][:],
-            'timestamps': root['timestamps'][:]
+            'timestamps': root['timestamps'][:],
+            'state': root['state'][:] if 'state' in root else np.full(
+                len(root['timestamps']), 2, dtype=np.int8
+            ),
         }
 
         optional_keys = [

@@ -189,7 +189,7 @@ class QPSafetyFilter:
         margin: float = 0.2,
         alpha: float = 1.0,
         max_constraints: int = 8,
-        influence_distance: float = 2.0,
+        influence_distance: float = 0.1,
     ):
         self.margin = float(margin)
         self.alpha = float(alpha)

@@ -165,6 +165,7 @@ class Mid360GazeboSession:
 
         self.world_path = self.runtime_dir / "world.sdf"
         self.robot_model_path = self.runtime_dir / "robot.urdf"
+        self.mid360_scan_csv_path = self.runtime_dir / "mid360-real-centr.csv"
         self.repo_robot_urdf_path = _repo_root() / "urdf" / "followdataset_mid360_robot.urdf"
         self.repo_full_robot_urdf_path = _repo_root() / "urdf" / "followdataset_full_robot.urdf"
         self.human_model_path = self.runtime_dir / "human.sdf"
@@ -427,14 +428,52 @@ class Mid360GazeboSession:
 
     def _write_runtime_files(self):
         world_sdf = self._generate_world_sdf()
+        self._write_mid360_scan_csv()
         robot_urdf = self._generate_robot_urdf()
         self.world_path.write_text(world_sdf, encoding="utf-8")
         self.robot_model_path.write_text(robot_urdf, encoding="utf-8")
-        self.repo_robot_urdf_path.parent.mkdir(parents=True, exist_ok=True)
-        self.repo_robot_urdf_path.write_text(robot_urdf, encoding="utf-8")
-        self.repo_full_robot_urdf_path.write_text(robot_urdf, encoding="utf-8")
+        self._write_optional_repo_urdf_copy(self.repo_robot_urdf_path, robot_urdf)
+        self._write_optional_repo_urdf_copy(self.repo_full_robot_urdf_path, robot_urdf)
         self.human_model_path.write_text(self._generate_human_sdf(), encoding="utf-8")
         self.leash_model_path.write_text(self._generate_leash_sdf(), encoding="utf-8")
+
+    def _write_mid360_scan_csv(self):
+        source = self._resolve_mid360_scan_csv()
+        shutil.copy2(source, self.mid360_scan_csv_path)
+
+    def _resolve_mid360_scan_csv(self) -> Path:
+        candidates = [
+            self.config.plugin_dir / "livox_laser_simulation" / "scan_mode" / "mid360-real-centr.csv",
+            self.config.plugin_dir / "scan_mode" / "mid360-real-centr.csv",
+        ]
+        if self.config.plugin_library_path is not None:
+            lib_path = Path(self.config.plugin_library_path).expanduser().resolve()
+            candidates.extend(
+                [
+                    lib_path.parent / "mid360-real-centr.csv",
+                    lib_path.parent.parent / "share" / "livox_laser_simulation" / "scan_mode" / "mid360-real-centr.csv",
+                    lib_path.parent.parent.parent / "src" / "livox_laser_simulation" / "scan_mode" / "mid360-real-centr.csv",
+                ]
+            )
+
+        for candidate in candidates:
+            candidate = candidate.expanduser().resolve()
+            if candidate.exists():
+                return candidate
+
+        searched = "\n".join(str(p.expanduser()) for p in candidates)
+        raise RuntimeError(
+            "Cannot find Mid-360 scan pattern CSV `mid360-real-centr.csv`.\n"
+            f"Searched:\n{searched}"
+        )
+
+    def _write_optional_repo_urdf_copy(self, path: Path, content: str):
+        """Best-effort debug copy; Gazebo uses the runtime URDF above."""
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+        except PermissionError as exc:
+            print(f"[warn] Cannot update optional URDF copy {path}: {exc}")
 
     def _import_ros_modules(self):
         required_commands = ["roscore", "roslaunch"]
