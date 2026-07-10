@@ -102,3 +102,4 @@ python replay.py --collect-pointcloud --all --overwrite
 ## 开发文档
 
 - [最近一次安全过滤提交说明](docs/commit_82ed297_qp_safety_filter_zh.md)
+- [当前 compliance 策略简述](docs/compliance_strategy.md)

@@ -13,6 +13,18 @@ matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.lines import Line2D
+
+plt.rcParams.update(
+    {
+        "font.size": 10,
+        "axes.labelsize": 10,
+        "xtick.labelsize": 9,
+        "ytick.labelsize": 9,
+        "legend.fontsize": 8,
+        "figure.dpi": 120,
+    }
+)
 
 
 FOLLOWDATASET_DIR = Path(__file__).resolve().parents[1]
@@ -52,7 +64,7 @@ MODE_COLORS = {
 
 @dataclass(frozen=True)
 class BenchmarkConfig:
-    num_cases: int = 12
+    num_cases: int = 48
     seed: int = 202607
     fps: int = 20
     frame_stride: int = 5
@@ -64,11 +76,11 @@ class BenchmarkConfig:
     leash_length: float = 1.0
     robot_speed: float = 1.0
     raw_forward_delta: float = 0.18
-    max_actions: int = 320
+    max_actions: int = 420
     lookahead_points: int = 16
     goal_fraction: float = 0.88
     tether_target_ratio: float = 0.28
-    safety_margin: float = 0.10
+    safety_margin: float = 0.11
 
     @property
     def sim_dt(self) -> float:
@@ -77,6 +89,66 @@ class BenchmarkConfig:
     @property
     def data_dt(self) -> float:
         return float(self.frame_stride) / float(self.fps)
+
+
+@dataclass(frozen=True)
+class ScenarioSpec:
+    name: str
+    label: str
+    path_length: float
+    num_segments: int
+    corridor_width: float
+    obstacle_radius: float
+    obstacle_jitter: float
+    tether_ratio: float
+
+
+SCENARIO_SPECS = (
+    ScenarioSpec(
+        name="regular",
+        label="regular",
+        path_length=12.0,
+        num_segments=4,
+        corridor_width=2.35,
+        obstacle_radius=0.13,
+        obstacle_jitter=0.16,
+        tether_ratio=0.24,
+    ),
+    ScenarioSpec(
+        name="cluttered",
+        label="cluttered",
+        path_length=12.0,
+        num_segments=4,
+        corridor_width=2.05,
+        obstacle_radius=0.16,
+        obstacle_jitter=0.22,
+        tether_ratio=0.28,
+    ),
+    ScenarioSpec(
+        name="narrow_turns",
+        label="narrow turns",
+        path_length=13.0,
+        num_segments=5,
+        corridor_width=2.15,
+        obstacle_radius=0.13,
+        obstacle_jitter=0.18,
+        tether_ratio=0.32,
+    ),
+    ScenarioSpec(
+        name="long_generalization",
+        label="long path",
+        path_length=14.0,
+        num_segments=5,
+        corridor_width=2.45,
+        obstacle_radius=0.14,
+        obstacle_jitter=0.24,
+        tether_ratio=0.30,
+    ),
+)
+
+
+def scenario_for_case(case_idx: int) -> ScenarioSpec:
+    return SCENARIO_SPECS[int(case_idx) % len(SCENARIO_SPECS)]
 
 
 def wrap_angle(angle: float) -> float:
@@ -212,14 +284,26 @@ def path_deviation(path: np.ndarray, reference_path: np.ndarray) -> float:
 
 def generate_path_case(case_idx: int, config: BenchmarkConfig) -> dict:
     np.random.seed(config.seed + int(case_idx) * 17)
+    scenario = scenario_for_case(case_idx)
     generator = PathGenerator(
-        target_length=config.path_length,
-        num_segments=4,
-        corridor_width=config.corridor_width,
-        obstacle_radius=config.obstacle_radius,
-        obstacle_jitter=0.18,
+        target_length=scenario.path_length,
+        num_segments=scenario.num_segments,
+        corridor_width=scenario.corridor_width,
+        obstacle_radius=scenario.obstacle_radius,
+        obstacle_jitter=scenario.obstacle_jitter,
     )
-    return generator.generate()
+    path_data = generator.generate()
+    path_data["scenario"] = {
+        "name": scenario.name,
+        "label": scenario.label,
+        "path_length": scenario.path_length,
+        "num_segments": scenario.num_segments,
+        "corridor_width": scenario.corridor_width,
+        "obstacle_radius": scenario.obstacle_radius,
+        "obstacle_jitter": scenario.obstacle_jitter,
+        "tether_ratio": scenario.tether_ratio,
+    }
+    return path_data
 
 
 def generate_raw_actions(path_data: dict, config: BenchmarkConfig) -> np.ndarray:
@@ -285,7 +369,8 @@ def generate_interaction_labels(
 ) -> np.ndarray:
     actions = np.asarray(actions, dtype=np.float32)
     rng = np.random.default_rng(config.seed + 1000 + int(case_idx))
-    target_count = int(round(config.tether_target_ratio * len(actions)))
+    scenario = scenario_for_case(case_idx)
+    target_count = int(round(scenario.tether_ratio * len(actions)))
     interval = max(14, int(round(0.055 * len(actions))))
     leash_mask = np.zeros((len(actions),), dtype=bool)
 
@@ -550,6 +635,7 @@ def summarize_case(
     }
     case = {
         "case_idx": int(case_idx),
+        "scenario": serialize(path_data.get("scenario", {})),
         "path_length": float(path_data["length"]),
         "obstacle_count": int(len(path_data.get("obstacles", []))),
         "segment_count": int(len(path_data.get("segment_obstacles", []))),
@@ -587,6 +673,8 @@ def flatten_case_rows(cases: list[dict]) -> list[dict]:
             rows.append(
                 {
                     "case_idx": int(case["case_idx"]),
+                    "scenario": str(case.get("scenario", {}).get("name", "unknown")),
+                    "scenario_label": str(case.get("scenario", {}).get("label", "unknown")),
                     "mode": mode,
                     "path_length": float(case["path_length"]),
                     "tether_ratio": float(case["tether_ratio"]),
@@ -608,55 +696,78 @@ def flatten_case_rows(cases: list[dict]) -> list[dict]:
     return rows
 
 
+def aggregate_mode_items(items: list[dict]) -> dict:
+    success = np.asarray([item["success"] for item in items], dtype=bool)
+    reached = np.asarray([item["reached_goal"] for item in items], dtype=bool)
+    collisions = np.asarray([item["collision"] for item in items], dtype=bool)
+    completion_times = np.asarray(
+        [
+            item["completion_time_sec"]
+            for item in items
+            if item["completion_time_sec"] is not None and item["success"]
+        ],
+        dtype=float,
+    )
+    durations = np.asarray([item["duration_sec"] for item in items], dtype=float)
+    return {
+        "success_rate": float(np.mean(success)),
+        "reach_rate": float(np.mean(reached)),
+        "collision_rate": float(np.mean(collisions)),
+        "mean_completion_time_sec": (
+            None if len(completion_times) == 0 else float(np.mean(completion_times))
+        ),
+        "median_completion_time_sec": (
+            None if len(completion_times) == 0 else float(np.median(completion_times))
+        ),
+        "mean_duration_sec": float(np.mean(durations)),
+        "mean_human_path_deviation": float(np.mean([item["human_path_deviation"] for item in items])),
+        "mean_human_min_clearance": float(np.mean([item["human_min_clearance"] for item in items])),
+        "mean_forward_action": float(np.mean([item["mean_forward_action"] for item in items])),
+        "mean_modified_steps": float(np.mean([item["modified_steps"] for item in items])),
+        "mean_compliance_steps": float(np.mean([item["compliance_steps"] for item in items])),
+    }
+
+
 def aggregate_cases(cases: list[dict], config: BenchmarkConfig) -> dict:
     aggregate = {
         "num_cases": int(len(cases)),
         "config": serialize(config.__dict__),
+        "scenario_specs": [serialize(spec.__dict__) for spec in SCENARIO_SPECS],
         "modes": {},
+        "scenarios": {},
     }
     for mode in MODE_ORDER:
         items = [case["modes"][mode] for case in cases]
-        success = np.asarray([item["success"] for item in items], dtype=bool)
-        reached = np.asarray([item["reached_goal"] for item in items], dtype=bool)
-        collisions = np.asarray([item["collision"] for item in items], dtype=bool)
-        completion_times = np.asarray(
-            [
-                item["completion_time_sec"]
-                for item in items
-                if item["completion_time_sec"] is not None and item["success"]
-            ],
-            dtype=float,
-        )
-        durations = np.asarray([item["duration_sec"] for item in items], dtype=float)
-        aggregate["modes"][mode] = {
-            "success_rate": float(np.mean(success)),
-            "reach_rate": float(np.mean(reached)),
-            "collision_rate": float(np.mean(collisions)),
-            "mean_completion_time_sec": (
-                None if len(completion_times) == 0 else float(np.mean(completion_times))
-            ),
-            "median_completion_time_sec": (
-                None if len(completion_times) == 0 else float(np.median(completion_times))
-            ),
-            "mean_duration_sec": float(np.mean(durations)),
-            "mean_human_path_deviation": float(np.mean([item["human_path_deviation"] for item in items])),
-            "mean_human_min_clearance": float(np.mean([item["human_min_clearance"] for item in items])),
-            "mean_forward_action": float(np.mean([item["mean_forward_action"] for item in items])),
-            "mean_modified_steps": float(np.mean([item["modified_steps"] for item in items])),
-            "mean_compliance_steps": float(np.mean([item["compliance_steps"] for item in items])),
+        aggregate["modes"][mode] = aggregate_mode_items(items)
+
+    for spec in SCENARIO_SPECS:
+        scenario_cases = [
+            case
+            for case in cases
+            if case.get("scenario", {}).get("name") == spec.name
+        ]
+        if not scenario_cases:
+            continue
+        aggregate["scenarios"][spec.name] = {
+            "label": spec.label,
+            "num_cases": int(len(scenario_cases)),
+            "modes": {
+                mode: aggregate_mode_items([case["modes"][mode] for case in scenario_cases])
+                for mode in MODE_ORDER
+            },
         }
     return aggregate
 
 
 def plot_aggregate(aggregate: dict, output_path: Path) -> None:
     metrics = [
-        ("success_rate", "Success Rate", "rate"),
-        ("collision_rate", "Collision Rate", "rate"),
-        ("mean_completion_time_sec", "Mean Completion Time", "sec"),
-        ("mean_compliance_steps", "Compliance Steps", "steps"),
+        ("success_rate", "Success rate"),
+        ("collision_rate", "Collision rate"),
+        ("mean_completion_time_sec", "Completion time [s]"),
+        ("mean_compliance_steps", "Compliance steps"),
     ]
-    fig, axes = plt.subplots(2, 2, figsize=(12.4, 7.2), constrained_layout=True)
-    for ax, (key, title, ylabel) in zip(axes.ravel(), metrics):
+    fig, axes = plt.subplots(2, 2, figsize=(11.8, 6.4), constrained_layout=True)
+    for ax, (key, ylabel) in zip(axes.ravel(), metrics):
         values = []
         for mode in MODE_ORDER:
             value = aggregate["modes"][mode].get(key)
@@ -667,7 +778,6 @@ def plot_aggregate(aggregate: dict, output_path: Path) -> None:
             color=[MODE_COLORS[mode] for mode in MODE_ORDER],
             alpha=0.88,
         )
-        ax.set_title(title, fontsize=12, fontweight="bold")
         ax.set_ylabel(ylabel)
         ax.grid(True, axis="y", color="#E5E7EB", linewidth=0.8)
         ax.tick_params(axis="x", labelsize=9)
@@ -677,9 +787,51 @@ def plot_aggregate(aggregate: dict, output_path: Path) -> None:
             if np.isfinite(value):
                 text = f"{value:.2f}" if key.endswith("_rate") else f"{value:.1f}"
                 ax.text(idx, value, text, ha="center", va="bottom", fontsize=9)
-    fig.suptitle("Full Benchmark Ablation: Safety and Efficiency", fontsize=15)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_path, dpi=180)
+    fig.savefig(output_path, dpi=300)
+    plt.close(fig)
+
+
+def plot_scenario_breakdown(aggregate: dict, output_path: Path) -> None:
+    metrics = [
+        ("success_rate", "Success rate"),
+        ("collision_rate", "Collision rate"),
+        ("mean_completion_time_sec", "Completion time [s]"),
+        ("mean_compliance_steps", "Compliance steps"),
+    ]
+    scenario_items = [
+        (spec.name, aggregate["scenarios"][spec.name]["label"])
+        for spec in SCENARIO_SPECS
+        if spec.name in aggregate.get("scenarios", {})
+    ]
+    x = np.arange(len(scenario_items), dtype=float)
+    width = 0.18
+    offsets = (np.arange(len(MODE_ORDER), dtype=float) - (len(MODE_ORDER) - 1) / 2.0) * width
+
+    fig, axes = plt.subplots(2, 2, figsize=(12.6, 7.0), constrained_layout=True)
+    for ax, (key, ylabel) in zip(axes.ravel(), metrics):
+        for mode_idx, mode in enumerate(MODE_ORDER):
+            values = []
+            for scenario_name, _scenario_label in scenario_items:
+                value = aggregate["scenarios"][scenario_name]["modes"][mode].get(key)
+                values.append(np.nan if value is None else float(value))
+            ax.bar(
+                x + offsets[mode_idx],
+                values,
+                width=width,
+                color=MODE_COLORS[mode],
+                alpha=0.88,
+                label=MODE_LABELS[mode],
+            )
+        ax.set_ylabel(ylabel)
+        ax.set_xticks(x)
+        ax.set_xticklabels([label for _name, label in scenario_items])
+        ax.grid(True, axis="y", color="#E5E7EB", linewidth=0.8)
+        if key.endswith("_rate"):
+            ax.set_ylim(0.0, 1.05)
+    axes.ravel()[1].legend(frameon=False, ncol=2, loc="upper right")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=300)
     plt.close(fig)
 
 
@@ -746,15 +898,10 @@ def plot_representative_case(
     ax.set_aspect("equal", adjustable="box")
     ax.set_xlabel("x [m]")
     ax.set_ylabel("y [m]")
-    ax.set_title(
-        f"Representative {entity.capitalize()} Trajectories",
-        fontsize=13,
-        fontweight="bold",
-    )
     ax.grid(True, color="#E5E7EB", linewidth=0.8)
     ax.legend(frameon=False, fontsize=8, loc="center left", bbox_to_anchor=(1.01, 0.5))
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_path, dpi=180)
+    fig.savefig(output_path, dpi=300)
     plt.close(fig)
 
 
@@ -788,6 +935,208 @@ def plot_labeled_human_path(
         )
         used.add(label)
         start = max(end - 1, start + 1)
+
+
+def paper_scene_case_indices(config: BenchmarkConfig, count: int = 5) -> tuple[int, ...]:
+    if config.num_cases <= 0:
+        return ()
+    if config.num_cases <= count:
+        return tuple(range(config.num_cases))
+    scenario_seed_indices = list(range(min(len(SCENARIO_SPECS), config.num_cases)))
+    extra_needed = max(0, count - len(scenario_seed_indices))
+    extra_indices = (
+        np.linspace(
+            len(scenario_seed_indices),
+            config.num_cases - 1,
+            num=extra_needed,
+            dtype=int,
+        ).tolist()
+        if extra_needed
+        else []
+    )
+    indices: list[int] = []
+    for index in scenario_seed_indices + extra_indices:
+        if int(index) not in indices:
+            indices.append(int(index))
+        if len(indices) == count:
+            break
+    return tuple(indices)
+
+
+def plot_scene_environment(
+    ax: plt.Axes,
+    path_data: dict,
+    *,
+    reference_alpha: float = 0.45,
+) -> list[np.ndarray]:
+    path = np.asarray(path_data["path"], dtype=np.float32)
+    obstacles = np.asarray(path_data.get("obstacles", []), dtype=np.float32)
+    segments = np.asarray(path_data.get("segment_obstacles", []), dtype=np.float32)
+
+    plotted_points = [path]
+    ax.plot(
+        path[:, 0],
+        path[:, 1],
+        color="#111827",
+        linestyle="--",
+        linewidth=0.75,
+        alpha=reference_alpha,
+        zorder=1,
+    )
+    for seg in segments:
+        ax.plot(
+            [seg[0], seg[2]],
+            [seg[1], seg[3]],
+            color="#9CA3AF",
+            linewidth=0.75,
+            alpha=0.90,
+            zorder=0,
+        )
+        plotted_points.append(np.asarray(seg, dtype=np.float32).reshape(2, 2))
+    for obs in obstacles:
+        ax.add_patch(
+            plt.Circle(
+                obs[:2],
+                obs[2],
+                facecolor="#B45309",
+                edgecolor="#7C2D12",
+                linewidth=0.35,
+                alpha=0.30,
+                zorder=2,
+            )
+        )
+        plotted_points.append(obs[:2][None, :])
+    return plotted_points
+
+
+def plot_labeled_reference_path(
+    ax: plt.Axes,
+    path: np.ndarray,
+    labels: np.ndarray,
+) -> None:
+    colors = {"guide": "#2563EB", "leash": "#EA580C", "tether": "#EA580C"}
+    path = np.asarray(path, dtype=np.float32)
+    labels = np.asarray(labels, dtype=object)
+    if len(path) < 2 or len(labels) == 0:
+        return
+    segment_count = len(path) - 1
+    for segment_idx in range(segment_count):
+        label_idx = int(round(segment_idx * (len(labels) - 1) / max(1, segment_count - 1)))
+        label = str(labels[label_idx]).lower()
+        ax.plot(
+            path[segment_idx:segment_idx + 2, 0],
+            path[segment_idx:segment_idx + 2, 1],
+            color=colors.get(label, "#6B7280"),
+            linewidth=1.65,
+            alpha=0.92,
+            solid_capstyle="round",
+            zorder=3,
+        )
+
+
+def format_dense_scene_axis(
+    ax: plt.Axes,
+    point_sets: list[np.ndarray],
+) -> None:
+    finite_sets = [
+        np.asarray(points, dtype=float).reshape(-1, 2)
+        for points in point_sets
+        if np.asarray(points).size
+    ]
+    if finite_sets:
+        points = np.vstack(finite_sets)
+        points = points[np.isfinite(points).all(axis=1)]
+    else:
+        points = np.empty((0, 2), dtype=float)
+    if len(points):
+        pad = 0.55
+        ax.set_xlim(float(points[:, 0].min() - pad), float(points[:, 0].max() + pad))
+        ax.set_ylim(float(points[:, 1].min() - pad), float(points[:, 1].max() + pad))
+    ax.set_aspect("equal", adjustable="box")
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.grid(True, color="#E5E7EB", linewidth=0.35)
+    for spine in ax.spines.values():
+        spine.set_linewidth(0.55)
+        spine.set_color("#D1D5DB")
+
+
+def plot_paper_scene_grid(
+    examples: list[dict],
+    output_path: Path,
+    config: BenchmarkConfig,
+) -> None:
+    if not examples:
+        return
+    examples = examples[:5]
+    col_count = len(examples)
+    fig, axes = plt.subplots(
+        2,
+        col_count,
+        figsize=(2.22 * col_count, 4.75),
+        constrained_layout=False,
+    )
+    if col_count == 1:
+        axes = np.asarray(axes).reshape(2, 1)
+
+    for col_idx, example in enumerate(examples):
+        path_data = example["path_data"]
+        labels = np.asarray(example["labels"], dtype=object)
+        path = np.asarray(path_data["path"], dtype=np.float32)
+
+        train_ax = axes[0, col_idx]
+        train_points = plot_scene_environment(train_ax, path_data, reference_alpha=0.28)
+        plot_labeled_reference_path(train_ax, path, labels)
+        train_ax.scatter(path[0, 0], path[0, 1], s=12, color="#059669", zorder=5)
+        train_ax.scatter(path[-1, 0], path[-1, 1], s=15, marker="*", color="#111827", zorder=5)
+        format_dense_scene_axis(
+            train_ax,
+            train_points,
+        )
+
+        exp_ax = axes[1, col_idx]
+        rollout = example["rollout"]
+        exp_points = plot_scene_environment(exp_ax, path_data, reference_alpha=0.20)
+        robot_path = np.asarray(rollout["robot_path"], dtype=np.float32)
+        human_path = np.asarray(rollout["human_path"], dtype=np.float32)
+        exp_ax.plot(
+            robot_path[:, 0],
+            robot_path[:, 1],
+            color="#111827",
+            linewidth=0.95,
+            alpha=0.62,
+            zorder=3,
+        )
+        plot_labeled_human_path(exp_ax, human_path, labels, config)
+        exp_ax.scatter(human_path[0, 0], human_path[0, 1], s=12, color="#059669", zorder=5)
+        exp_ax.scatter(human_path[-1, 0], human_path[-1, 1], s=15, marker="*", color="#111827", zorder=5)
+        exp_points.extend([robot_path, human_path])
+        format_dense_scene_axis(
+            exp_ax,
+            exp_points,
+        )
+
+    axes[0, 0].set_ylabel("training\nscenes", fontsize=9)
+    axes[1, 0].set_ylabel("experiment\nrollouts", fontsize=9)
+    legend_handles = [
+        Line2D([0], [0], color="#2563EB", linewidth=2.0, label="guide label / human path"),
+        Line2D([0], [0], color="#EA580C", linewidth=2.0, label="leash label / human path"),
+        Line2D([0], [0], color="#111827", linewidth=1.0, alpha=0.65, label="robot path"),
+        Line2D([0], [0], color="#111827", linestyle="--", linewidth=0.9, alpha=0.45, label="reference path"),
+        Line2D([0], [0], marker="o", color="none", markerfacecolor="#B45309", alpha=0.55, label="obstacle"),
+    ]
+    fig.legend(
+        handles=legend_handles,
+        loc="lower center",
+        ncol=5,
+        frameon=False,
+        fontsize=7.7,
+        bbox_to_anchor=(0.5, 0.005),
+    )
+    fig.subplots_adjust(left=0.045, right=0.995, top=0.985, bottom=0.12, wspace=0.06, hspace=0.20)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=300)
+    plt.close(fig)
 
 
 def shade_interaction_spans(
@@ -919,7 +1268,6 @@ def plot_interaction_aware_collision_diagnosis(
     ax_path.set_aspect("equal", adjustable="box")
     ax_path.set_xlabel("x [m]")
     ax_path.set_ylabel("y [m]")
-    ax_path.set_title(f"Case {case_idx}: ours collision after guide resumes")
     ax_path.grid(True, color="#E5E7EB", linewidth=0.8)
     ax_path.legend(frameon=False, fontsize=8, loc="best")
 
@@ -954,12 +1302,11 @@ def plot_interaction_aware_collision_diagnosis(
     ax_clearance.set_ylim(min(-0.05, float(np.min(clearance[local_start:local_end])) - 0.02), 0.35)
     ax_clearance.set_xlabel("time [s]")
     ax_clearance.set_ylabel("clearance [m]")
-    ax_clearance.set_title("Low margin detects the human hazard too late")
     ax_clearance.grid(True, color="#E5E7EB", linewidth=0.8)
     ax_clearance.legend(frameon=False, fontsize=8, loc="upper right")
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_path, dpi=180)
+    fig.savefig(output_path, dpi=300)
     plt.close(fig)
     return {
         "case_idx": int(case_idx),
@@ -975,6 +1322,8 @@ def run_full_benchmark(config: BenchmarkConfig = BenchmarkConfig()) -> dict:
     ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
     cases: list[dict] = []
     representative = None
+    paper_scene_indices = set(paper_scene_case_indices(config, count=5))
+    paper_scene_examples: list[dict] = []
 
     for case_idx in range(config.num_cases):
         path_data = generate_path_case(case_idx, config)
@@ -998,7 +1347,23 @@ def run_full_benchmark(config: BenchmarkConfig = BenchmarkConfig()) -> dict:
             config=config,
         )
         cases.append(case)
-        if representative is None:
+        if case_idx in paper_scene_indices:
+            paper_scene_examples.append(
+                {
+                    "case_idx": int(case_idx),
+                    "path_data": path_data,
+                    "labels": labels.copy(),
+                    "rollout": rollouts["ours"],
+                }
+            )
+        if (
+            representative is None
+            or (
+                not representative[1]["diffusion"]["collision"]
+                and rollouts["diffusion"]["collision"]
+                and rollouts["ours"]["success"]
+            )
+        ):
             representative = (path_data, rollouts)
 
     aggregate = aggregate_cases(cases, config)
@@ -1007,8 +1372,10 @@ def run_full_benchmark(config: BenchmarkConfig = BenchmarkConfig()) -> dict:
     summary_path = ARTIFACT_DIR / "compliance_full_benchmark_summary.json"
     csv_path = ARTIFACT_DIR / "compliance_full_benchmark_cases.csv"
     aggregate_plot_path = ARTIFACT_DIR / "compliance_full_benchmark_aggregate.png"
+    scenario_plot_path = ARTIFACT_DIR / "compliance_full_benchmark_scenarios.png"
     representative_robot_plot_path = ARTIFACT_DIR / "compliance_full_benchmark_representative_robot.png"
     representative_human_plot_path = ARTIFACT_DIR / "compliance_full_benchmark_representative_human.png"
+    paper_scene_grid_path = ARTIFACT_DIR / "paper_training_experiment_scene_grid.png"
     diagnosis_plot_path = ARTIFACT_DIR / "ours_collision_diagnosis.png"
     data_path = ARTIFACT_DIR / "compliance_full_benchmark_data.npz"
     diagnosis = plot_interaction_aware_collision_diagnosis(config, diagnosis_plot_path)
@@ -1021,8 +1388,10 @@ def run_full_benchmark(config: BenchmarkConfig = BenchmarkConfig()) -> dict:
             "summary": str(summary_path),
             "csv": str(csv_path),
             "aggregate_plot": str(aggregate_plot_path),
+            "scenario_plot": str(scenario_plot_path),
             "representative_robot_plot": str(representative_robot_plot_path),
             "representative_human_plot": str(representative_human_plot_path),
+            "paper_scene_grid": str(paper_scene_grid_path),
             "collision_diagnosis_plot": str(diagnosis_plot_path),
             "data": str(data_path),
         },
@@ -1034,6 +1403,8 @@ def run_full_benchmark(config: BenchmarkConfig = BenchmarkConfig()) -> dict:
         writer.writeheader()
         writer.writerows(rows)
     plot_aggregate(aggregate, aggregate_plot_path)
+    plot_scenario_breakdown(aggregate, scenario_plot_path)
+    plot_paper_scene_grid(paper_scene_examples, paper_scene_grid_path, config)
     if representative is not None:
         plot_representative_case(
             path_data=representative[0],
@@ -1064,15 +1435,37 @@ def run_full_benchmark(config: BenchmarkConfig = BenchmarkConfig()) -> dict:
         ],
         dtype=np.float32,
     )
+    scenario_names = [
+        spec.name for spec in SCENARIO_SPECS if spec.name in aggregate.get("scenarios", {})
+    ]
+    metric_keys = ["success_rate", "collision_rate", "mean_completion_time_sec", "mean_compliance_steps"]
+    scenario_metric_tensor = np.asarray(
+        [
+            [
+                [
+                    np.nan
+                    if aggregate["scenarios"][scenario_name]["modes"][mode][metric_key] is None
+                    else aggregate["scenarios"][scenario_name]["modes"][mode][metric_key]
+                    for metric_key in metric_keys
+                ]
+                for mode in MODE_ORDER
+            ]
+            for scenario_name in scenario_names
+        ],
+        dtype=np.float32,
+    )
     np.savez(
         data_path,
         modes=np.asarray(MODE_ORDER, dtype=object),
         labels=np.asarray([MODE_LABELS[mode] for mode in MODE_ORDER], dtype=object),
-        metrics=np.asarray(
-            ["success_rate", "collision_rate", "mean_completion_time_sec", "mean_compliance_steps"],
+        metrics=np.asarray(metric_keys, dtype=object),
+        metric_matrix=metric_matrix,
+        scenarios=np.asarray(scenario_names, dtype=object),
+        scenario_labels=np.asarray(
+            [aggregate["scenarios"][name]["label"] for name in scenario_names],
             dtype=object,
         ),
-        metric_matrix=metric_matrix,
+        scenario_metric_tensor=scenario_metric_tensor,
     )
     return result
 
@@ -1084,8 +1477,16 @@ def assert_full_benchmark_result(result: dict) -> None:
     safe_compliance = aggregate["safe_compliance"]
     ours = aggregate["ours"]
 
-    assert result["aggregate"]["num_cases"] >= 8
+    assert result["aggregate"]["num_cases"] >= 48
+    assert len(result["aggregate"].get("scenarios", {})) >= 4
+    for scenario in result["aggregate"]["scenarios"].values():
+        assert scenario["num_cases"] >= 8
+        assert scenario["modes"]["ours"]["collision_rate"] == 0.0
     assert diffusion_qp["collision_rate"] <= diffusion["collision_rate"]
+    assert diffusion["collision_rate"] >= 0.25
+    assert safe_compliance["collision_rate"] == 0.0
+    assert ours["collision_rate"] == 0.0
+    assert ours["success_rate"] >= 0.95
     assert ours["success_rate"] >= diffusion["success_rate"]
     assert ours["success_rate"] >= safe_compliance["success_rate"] - 0.10
     assert ours["collision_rate"] <= diffusion["collision_rate"]

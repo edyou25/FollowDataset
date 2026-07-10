@@ -308,7 +308,6 @@ def plot_interaction_aware_demo(
     label_colors = {"guide": "#2563EB", "leash": "#DC2626", "unknown": "#9CA3AF"}
 
     fig, ax = plt.subplots(figsize=(10.8, 2.2))
-    ax.set_title("Segmentation: Guide vs Tether", fontsize=12, fontweight="bold")
     ax.plot(
         labeled["robot_x"].to_numpy(dtype=float) / 1000.0,
         labeled["robot_y"].to_numpy(dtype=float) / 1000.0,
@@ -350,7 +349,7 @@ def plot_interaction_aware_demo(
         bbox_to_anchor=(1.01, 0.5),
     )
     segmentation_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(segmentation_path, dpi=180, bbox_inches="tight", pad_inches=0.25)
+    fig.savefig(segmentation_path, dpi=300, bbox_inches="tight", pad_inches=0.25)
     plt.close(fig)
 
     fig, axes = plt.subplots(
@@ -364,7 +363,6 @@ def plot_interaction_aware_demo(
     config = make_config(scenario)
 
     ax = axes[0]
-    ax.set_title("Robot Progress", fontsize=12, fontweight="bold")
     for mode, color, label in (
         ("raw_policy", "#7F1D1D", "raw"),
         ("full_time_compliance", "#581C87", "full-time compliance"),
@@ -388,7 +386,6 @@ def plot_interaction_aware_demo(
     ax.legend(frameon=False, fontsize=8)
 
     ax = axes[1]
-    ax.set_title("Forward Action Gating (Smoothed)", fontsize=12, fontweight="bold")
     action_time = np.arange(scenario.frame_count, dtype=float) * config.data_dt
     tether_span_labeled = False
     for start, end in state_runs(labels):
@@ -429,9 +426,8 @@ def plot_interaction_aware_demo(
     ax.grid(True, color="#E5E7EB", linewidth=0.8)
     ax.legend(frameon=False, fontsize=8)
 
-    fig.suptitle("Interaction-Aware Compliance Timing and Gating", fontsize=14)
     progress_action_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(progress_action_path, dpi=180)
+    fig.savefig(progress_action_path, dpi=300)
     plt.close(fig)
 
 

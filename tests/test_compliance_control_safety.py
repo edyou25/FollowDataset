@@ -236,8 +236,7 @@ def plot_compliance_scenario(
         "compliance_no_safety": ("#581C87", "#0F766E"),
         "compliance_safe": ("#1D4ED8", "#047857"),
     }
-    for ax, (mode, title) in zip(axes, panels):
-        ax.set_title(title, fontsize=13, fontweight="bold")
+    for ax, (mode, _title) in zip(axes, panels):
         ax.set_facecolor("#F8FAFC")
         ax.plot(
             scenario.reference_path[:, 0],
@@ -376,9 +375,8 @@ def plot_compliance_scenario(
         frameon=False,
         fontsize=9,
     )
-    fig.suptitle("BRE Compliance Control: Safety-Constrained Projection", fontsize=15)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_path, dpi=180)
+    fig.savefig(output_path, dpi=300)
     plt.close(fig)
 
 
@@ -514,6 +512,33 @@ def assert_compliance_control_summary(summary: dict) -> None:
 def test_compliance_control_safety_visualization() -> None:
     summary = run_compliance_control_demo()
     assert_compliance_control_summary(summary)
+
+
+def test_preserve_heading_compliance_only_slows_forward_motion() -> None:
+    engine = PhysicsEngine(robot_speed=1.5, dt=0.05)
+    engine.reset(np.array([0.0, 0.0], dtype=np.float32))
+    actions = np.array(
+        [
+            [0.30, 0.38],
+            [-0.12, -0.31],
+        ],
+        dtype=np.float32,
+    )
+    config = ComplianceControlConfig(
+        data_dt=0.25,
+        sim_dt=0.05,
+        frame_stride=5,
+        safety_mode="off",
+        heading_control=False,
+        forward_only_slowdown=True,
+        preserve_heading=True,
+    )
+
+    result = apply_bre_compliance_control(actions, engine, config, bre=True)
+
+    assert np.allclose(result.actions[:, 1], 0.0)
+    assert np.all(result.actions[:, 0] <= 0.075 + 1e-6)
+    assert np.all(result.actions[:, 0] >= 0.0)
 
 
 if __name__ == "__main__":

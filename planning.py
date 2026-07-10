@@ -659,7 +659,13 @@ class ModelPlanner:
         self.cached_nominal_delta_seq = None
         self.cached_safe_delta_seq = None
         self.cached_safety_info_seq = None
+        self.cached_interaction_labels_seq = None
+        self.cached_uses_stashed_compliance_plan = False
         self.cached_action_idx = 0
+        self.stashed_guide_action_seq = None
+        self.stashed_guide_cursor = 0
+        self.using_stashed_compliance_plan = False
+        self.last_stashed_compliance_info = {}
         self.inference_interval = max(1, self.n_action_steps // 2)  # Infer every N frames
         self.frames_since_inference = 0
         self.cached_control = (0.0, 0.0)
@@ -859,6 +865,9 @@ class ModelPlanner:
             self.policy.reset()
         # Reset action cache
         self._reset_runtime_caches()
+        self.stashed_guide_action_seq = None
+        self.stashed_guide_cursor = 0
+        self.last_stashed_compliance_info = {}
         self.data_step_idx = 0
         self.episode_safety_stats = {
             "modified_steps": 0,
@@ -875,6 +884,8 @@ class ModelPlanner:
         sim_time = float((self.frame_count - self.bre_timer_start_frame) * self.sim_dt)
         for toggle_time in self.bre_toggle_times:
             if toggle_time not in self.triggered_bre_toggle_times and sim_time >= toggle_time:
+                if not self.bre:
+                    self._stash_current_cached_guide_plan()
                 self.bre = not self.bre
                 self._reset_runtime_caches()
                 self.triggered_bre_toggle_times.add(toggle_time)
@@ -896,6 +907,8 @@ class ModelPlanner:
         self.cached_nominal_delta_seq = None
         self.cached_safe_delta_seq = None
         self.cached_safety_info_seq = None
+        self.cached_interaction_labels_seq = None
+        self.cached_uses_stashed_compliance_plan = False
         self.cached_action_idx = 0
         self.frames_since_inference = 0
         self.cached_control = (0.0, 0.0)
@@ -917,6 +930,84 @@ class ModelPlanner:
             "constraint_count": 0,
             "min_clearance": float("inf"),
         }
+        self.using_stashed_compliance_plan = False
+
+    @staticmethod
+    def _compliance_mask_from_labels(labels: np.ndarray) -> np.ndarray:
+        return np.isin(
+            np.asarray(labels, dtype=str),
+            np.array(["leash", "tether"], dtype=str),
+        )
+
+    def _stash_guide_action_seq(self, action_seq: np.ndarray, source: str) -> None:
+        action_seq = np.asarray(action_seq, dtype=np.float32)
+        if action_seq.ndim != 2 or len(action_seq) == 0:
+            return
+        front_half_len = max(1, len(action_seq) // 2)
+        self.stashed_guide_action_seq = action_seq.copy()
+        self.stashed_guide_cursor = 0
+        self.last_stashed_compliance_info = {
+            "source": str(source),
+            "stashed_len": int(len(action_seq)),
+            "stashed_front_half_len": int(front_half_len),
+        }
+
+    def _stash_current_cached_guide_plan(self) -> None:
+        if self.cached_action_seq is None or len(self.cached_action_seq) == 0:
+            return
+        if self._current_interaction_label() != "guide":
+            return
+        start = min(max(0, int(self.cached_action_idx)), len(self.cached_action_seq) - 1)
+        remaining = np.asarray(self.cached_action_seq[start:], dtype=np.float32)
+        if len(remaining) == 0:
+            remaining = np.asarray(self.cached_action_seq, dtype=np.float32)
+        self._stash_guide_action_seq(remaining, source="cached_remaining")
+
+    def _stashed_compliance_action_seq(
+        self,
+        requested_len: int,
+        fallback_action_seq: np.ndarray,
+    ) -> tuple[np.ndarray, dict]:
+        requested_len = max(1, int(requested_len))
+        fallback_action_seq = np.asarray(fallback_action_seq, dtype=np.float32)
+        if (
+            self.stashed_guide_action_seq is not None
+            and len(self.stashed_guide_action_seq) > 0
+        ):
+            stash = np.asarray(self.stashed_guide_action_seq, dtype=np.float32)
+            half_len = max(1, len(stash) // 2)
+            start = max(0, int(self.stashed_guide_cursor))
+            if start >= half_len:
+                segment = np.zeros((1, stash.shape[1]), dtype=np.float32)
+                start = half_len
+            else:
+                end = min(half_len, start + half_len)
+                segment = stash[start:end].copy()
+            info = {
+                "using_stashed_compliance_plan": bool(start < half_len),
+                "stashed_source": str(self.last_stashed_compliance_info.get("source", "guide")),
+                "stashed_len": int(len(stash)),
+                "stashed_cursor": int(start),
+                "stashed_used_len": int(len(segment)),
+                "stashed_front_half_len": int(half_len),
+            }
+            return segment.astype(np.float32), info
+
+        action_dim = (
+            int(fallback_action_seq.shape[1])
+            if fallback_action_seq.ndim == 2 and fallback_action_seq.shape[1] > 0
+            else int(self.action_dim)
+        )
+        fallback = np.zeros((requested_len, action_dim), dtype=np.float32)
+        info = {
+            "using_stashed_compliance_plan": False,
+            "stashed_source": "fallback_stop_no_stash",
+            "stashed_len": 0,
+            "stashed_cursor": 0,
+            "stashed_used_len": int(len(fallback)),
+            "stashed_front_half_len": 0,
+        }
+        return fallback.astype(np.float32), info
 
     def _start_recording(self):
         if self.storage is None:
@@ -1631,6 +1722,8 @@ class ModelPlanner:
                     if self.collect_enabled:
                         self._save_episode()
                 elif event.key == pygame.K_b:
+                    if not self.bre:
+                        self._stash_current_cached_guide_plan()
                     self.bre = not self.bre
                     self._reset_runtime_caches()
                     print(f"Interaction state: {self._current_interaction_label()} (bre={self.bre})")
@@ -1715,7 +1808,10 @@ class ModelPlanner:
                 sim_dt=float(self.sim_dt),
                 frame_stride=int(self.frame_stride),
                 turn_gain=float(self.turn_gain),
-                safety_mode=self.safety_mode,
+                safety_mode="off",
+                heading_control=False,
+                forward_only_slowdown=True,
+                preserve_heading=False,
                 curvature_slowdown=bool(self.curvature_slowdown),
                 curvature_scale=float(self.curvature_scale),
                 min_speed_scale=float(self.min_speed_scale),
@@ -1805,6 +1901,7 @@ class ModelPlanner:
             segment_obstacles = self.current_path_data.get("segment_obstacles")
 
         labels = self._interaction_labels_for_action_seq(len(action_seq))
+        self.cached_interaction_labels_seq = labels.copy()
         compliance_mask = np.isin(labels.astype(str), np.array(["leash", "tether"], dtype=object))
         if not np.any(compliance_mask):
             self._reset_compliance_stats_for_labels(labels)
@@ -1819,7 +1916,10 @@ class ModelPlanner:
                 sim_dt=float(self.sim_dt),
                 frame_stride=int(self.frame_stride),
                 turn_gain=float(self.turn_gain),
-                safety_mode=self.safety_mode,
+                safety_mode="off",
+                heading_control=False,
+                forward_only_slowdown=True,
+                preserve_heading=False,
                 curvature_slowdown=bool(self.curvature_slowdown),
                 curvature_scale=float(self.curvature_scale),
                 min_speed_scale=float(self.min_speed_scale),
@@ -2436,6 +2536,7 @@ class ModelPlanner:
         delta_seq: np.ndarray,
         protect_robot: bool = True,
         protect_human: Optional[bool] = None,
+        bre_override: Optional[bool] = None,
     ) -> Optional[np.ndarray]:
         if delta_seq is None or delta_seq.size == 0:
             return None
@@ -2456,6 +2557,7 @@ class ModelPlanner:
                 segment_obstacles=segments,
                 protect_robot=protect_robot,
                 protect_human=protect_human,
+                bre_override=bre_override,
             )
             if step_points:
                 points.extend(step_points)
@@ -2664,13 +2766,15 @@ class ModelPlanner:
         segment_obstacles: Optional[np.ndarray],
         protect_robot: bool = True,
         protect_human: bool = True,
+        bre_override: Optional[bool] = None,
     ) -> tuple[bool, list[np.ndarray]]:
         _, forward, turn, _speed_scale = self._action_to_execution(
             action,
             engine.robot.position,
             engine.robot.heading,
         )
-        engine.set_control(forward, turn, self.bre)
+        bre = self.bre if bre_override is None else bool(bre_override)
+        engine.set_control(forward, turn, bre)
         points: list[np.ndarray] = []
         for _ in range(int(self.frame_stride)):
             robot_state, _human_state = engine.step()
@@ -2693,6 +2797,7 @@ class ModelPlanner:
         self,
         engine: PhysicsEngine,
         action: np.ndarray,
+        bre_override: Optional[bool] = None,
     ) -> tuple[np.ndarray, PhysicsEngine]:
         nominal_engine = copy.deepcopy(engine)
         start_pos = nominal_engine.robot.position.copy()
@@ -2703,6 +2808,7 @@ class ModelPlanner:
             segment_obstacles=None,
             protect_robot=False,
             protect_human=False,
+            bre_override=bre_override,
         )
         delta = (nominal_engine.robot.position - start_pos).astype(np.float32)
         return delta, nominal_engine
@@ -2913,6 +3019,203 @@ class ModelPlanner:
         info["final_delta_norm"] = float(np.linalg.norm(chosen_delta))
         return chosen_delta.astype(np.float32), trial_engine, info
 
+    def _forward_only_safety_filter_delta(
+        self,
+        engine: PhysicsEngine,
+        nominal_delta: np.ndarray,
+        obstacles: Optional[np.ndarray],
+        segment_obstacles: Optional[np.ndarray],
+        bre_override: Optional[bool] = None,
+    ) -> tuple[np.ndarray, PhysicsEngine, dict]:
+        nominal_delta = np.asarray(nominal_delta, dtype=np.float32).reshape(2)
+        nominal_norm = float(np.linalg.norm(nominal_delta))
+        has_obstacles = (
+            obstacles is not None
+            and len(obstacles) > 0
+        ) or (
+            segment_obstacles is not None
+            and len(segment_obstacles) > 0
+        )
+        if self.safety_mode == "off" or not has_obstacles or nominal_norm < 1e-6:
+            trial_engine = copy.deepcopy(engine)
+            self._simulate_delta_on_engine(
+                trial_engine,
+                nominal_delta,
+                obstacles=None,
+                segment_obstacles=None,
+                protect_robot=False,
+                protect_human=False,
+                bre_override=bre_override,
+            )
+            info = self._empty_safety_info()
+            info.update(
+                {
+                    "forward_only": True,
+                    "robot_heading": float(engine.robot.heading),
+                    "nominal_delta": nominal_delta.astype(np.float32),
+                    "nominal_delta_norm": nominal_norm,
+                    "qp_delta": nominal_delta.astype(np.float32),
+                    "qp_delta_norm": nominal_norm,
+                    "final_delta": nominal_delta.astype(np.float32),
+                    "final_delta_norm": nominal_norm,
+                    "resolution_stage": "forward_only",
+                    "protect_human": bool(self._safety_protects_human()),
+                    "qp_modified": False,
+                    "qp_ref_feasible": True,
+                    "collision_after_qp": False,
+                    "backoff_applied": False,
+                    "backoff_scale": 1.0,
+                    "stop_triggered": False,
+                    "stop_clearance_threshold": float(self.safety_stop_clearance),
+                    "stop_reason": None,
+                }
+            )
+            return nominal_delta.astype(np.float32), trial_engine, info
+
+        protect_human = self._safety_protects_human()
+        attempts: list[dict] = []
+        chosen_delta = np.zeros((2,), dtype=np.float32)
+        chosen_engine = copy.deepcopy(engine)
+        chosen_qp = None
+        chosen_scale = 0.0
+        chosen_collision = False
+        resolution_stage = "forward_only_stop"
+
+        for scale in self.safety_backoff_scales:
+            candidate_delta = (nominal_delta * float(scale)).astype(np.float32)
+            candidate_preview = copy.deepcopy(engine)
+            collided, _ = self._simulate_delta_on_engine(
+                candidate_preview,
+                candidate_delta,
+                obstacles=obstacles,
+                segment_obstacles=segment_obstacles,
+                protect_robot=True,
+                protect_human=protect_human,
+                bre_override=bre_override,
+            )
+            extra_entities = [
+                (
+                    "robot_future",
+                    candidate_preview.robot.position.copy(),
+                    self.physics.robot_radius,
+                )
+            ]
+            if protect_human:
+                extra_entities.append(
+                    (
+                        "human_future",
+                        candidate_preview.human.position.copy(),
+                        self.physics.human_radius,
+                    )
+                )
+            qp = self.safety_filter.project_delta(
+                ref_delta=candidate_delta,
+                robot_pos=engine.robot.position,
+                robot_radius=self.physics.robot_radius,
+                human_pos=engine.human.position,
+                human_radius=self.physics.human_radius,
+                circle_obstacles=obstacles,
+                segment_obstacles=segment_obstacles,
+                include_human=protect_human,
+                extra_entities=extra_entities,
+            )
+            ref_feasible = bool(getattr(qp, "ref_feasible", True)) and not bool(qp.modified)
+            attempts.append(
+                {
+                    "scale": float(scale),
+                    "delta": candidate_delta.astype(np.float32),
+                    "collided": bool(collided),
+                    "qp_modified": bool(qp.modified),
+                    "qp_ref_feasible": bool(getattr(qp, "ref_feasible", True)),
+                    "min_clearance": float(qp.min_clearance),
+                    "constraint_count": int(qp.constraint_count),
+                }
+            )
+            if ref_feasible and not collided:
+                chosen_delta = candidate_delta
+                chosen_engine = candidate_preview
+                chosen_qp = qp
+                chosen_scale = float(scale)
+                chosen_collision = bool(collided)
+                resolution_stage = "forward_only" if scale == 1.0 else "forward_only_backoff"
+                break
+
+        if chosen_qp is None:
+            chosen_delta = np.zeros((2,), dtype=np.float32)
+            chosen_engine = copy.deepcopy(engine)
+            _collided, _ = self._simulate_delta_on_engine(
+                chosen_engine,
+                chosen_delta,
+                obstacles=obstacles,
+                segment_obstacles=segment_obstacles,
+                protect_robot=True,
+                protect_human=protect_human,
+                bre_override=bre_override,
+            )
+            extra_entities = [
+                ("robot_future", chosen_engine.robot.position.copy(), self.physics.robot_radius)
+            ]
+            if protect_human:
+                extra_entities.append(
+                    ("human_future", chosen_engine.human.position.copy(), self.physics.human_radius)
+                )
+            chosen_qp = self.safety_filter.project_delta(
+                ref_delta=chosen_delta,
+                robot_pos=engine.robot.position,
+                robot_radius=self.physics.robot_radius,
+                human_pos=engine.human.position,
+                human_radius=self.physics.human_radius,
+                circle_obstacles=obstacles,
+                segment_obstacles=segment_obstacles,
+                include_human=protect_human,
+                extra_entities=extra_entities,
+            )
+            chosen_collision = bool(_collided)
+
+        info = {
+            "modified": bool(
+                abs(chosen_scale - 1.0) > 1e-6
+                or np.linalg.norm(chosen_delta - nominal_delta) > 1e-5
+            ),
+            "shift": float(np.linalg.norm(chosen_delta - nominal_delta)),
+            "constraint_count": int(chosen_qp.constraint_count),
+            "min_clearance": float(chosen_qp.min_clearance),
+            "robot_pos": engine.robot.position.copy().astype(np.float32),
+            "human_pos": engine.human.position.copy().astype(np.float32),
+            "robot_heading": float(engine.robot.heading),
+            "nominal_delta": nominal_delta.astype(np.float32),
+            "nominal_delta_norm": nominal_norm,
+            "nominal_preview_robot_pos": chosen_engine.robot.position.copy().astype(np.float32),
+            "nominal_preview_human_pos": chosen_engine.human.position.copy().astype(np.float32),
+            "protect_human": bool(protect_human),
+            "qp_delta": chosen_qp.delta.astype(np.float32),
+            "qp_delta_norm": float(np.linalg.norm(chosen_qp.delta)),
+            "qp_modified": bool(chosen_qp.modified),
+            "qp_constraint_count": int(chosen_qp.constraint_count),
+            "qp_total_constraint_count": int(
+                getattr(chosen_qp, "total_constraint_count", chosen_qp.constraint_count)
+            ),
+            "qp_ref_feasible": bool(getattr(chosen_qp, "ref_feasible", True)),
+            "qp_candidate_count": int(getattr(chosen_qp, "candidate_count", 0)),
+            "qp_best_candidate_kind": str(getattr(chosen_qp, "best_candidate_kind", "unknown")),
+            "qp_best_candidate_constraints": list(
+                getattr(chosen_qp, "best_candidate_constraints", [])
+            ),
+            "qp_selected_constraints": list(getattr(chosen_qp, "selected_constraints", [])),
+            "collision_after_qp": bool(chosen_collision),
+            "backoff_attempts": attempts,
+            "backoff_applied": bool(chosen_scale < 1.0),
+            "backoff_scale": float(chosen_scale),
+            "stop_triggered": bool(chosen_scale == 0.0),
+            "stop_clearance_threshold": float(self.safety_stop_clearance),
+            "stop_reason": "forward_only_no_feasible_scale" if chosen_scale == 0.0 else None,
+            "resolution_stage": resolution_stage,
+            "forward_only": True,
+            "final_delta": chosen_delta.astype(np.float32),
+            "final_delta_norm": float(np.linalg.norm(chosen_delta)),
+        }
+        return chosen_delta.astype(np.float32), chosen_engine, info
+
     def _safety_filter_action(
         self,
         engine: PhysicsEngine,
@@ -2954,8 +3257,15 @@ class ModelPlanner:
     def _apply_forward_heading_safety_filter(
         self,
         action_seq: np.ndarray,
+        preserve_heading_mask: Optional[np.ndarray] = None,
     ) -> tuple[np.ndarray, np.ndarray, list[dict]]:
         action_seq = np.asarray(action_seq, dtype=np.float32)
+        if preserve_heading_mask is None:
+            preserve_heading_mask = np.zeros((len(action_seq),), dtype=bool)
+        else:
+            preserve_heading_mask = np.asarray(preserve_heading_mask, dtype=bool).reshape(-1)
+            if preserve_heading_mask.shape[0] != len(action_seq):
+                preserve_heading_mask = np.zeros((len(action_seq),), dtype=bool)
         stats = {
             "applied": self.safety_mode != "off",
             "modified_steps": 0,
@@ -2980,22 +3290,36 @@ class ModelPlanner:
         safety_infos: list[dict] = []
         shifts = []
 
-        for nominal_action in action_seq:
-            nominal_delta, nominal_preview = self._forward_heading_action_to_nominal_delta(
-                sim, nominal_action
-            )
-            if self.safety_mode == "off":
-                chosen_delta = nominal_delta
-                trial_engine = nominal_preview
-                info = self._empty_safety_info()
-            else:
-                chosen_delta, trial_engine, info = self._safety_filter_delta(
+        for idx, nominal_action in enumerate(action_seq):
+            if bool(preserve_heading_mask[idx]):
+                nominal_delta, _nominal_preview = self._forward_heading_action_to_nominal_delta(
+                    sim,
+                    nominal_action,
+                    bre_override=False,
+                )
+                chosen_delta, trial_engine, info = self._forward_only_safety_filter_delta(
                     sim,
                     nominal_delta,
                     obstacles=obstacles,
                     segment_obstacles=segments,
-                    nominal_preview=nominal_preview,
+                    bre_override=False,
                 )
+            else:
+                nominal_delta, nominal_preview = self._forward_heading_action_to_nominal_delta(
+                    sim, nominal_action
+                )
+                if self.safety_mode == "off":
+                    chosen_delta = nominal_delta
+                    trial_engine = nominal_preview
+                    info = self._empty_safety_info()
+                else:
+                    chosen_delta, trial_engine, info = self._safety_filter_delta(
+                        sim,
+                        nominal_delta,
+                        obstacles=obstacles,
+                        segment_obstacles=segments,
+                        nominal_preview=nominal_preview,
+                    )
 
             nominal_deltas.append(nominal_delta.astype(np.float32))
             safe_deltas.append(chosen_delta.astype(np.float32))
@@ -3122,13 +3446,15 @@ class ModelPlanner:
         segment_obstacles: Optional[np.ndarray],
         protect_robot: bool = True,
         protect_human: bool = True,
+        bre_override: Optional[bool] = None,
     ) -> tuple[bool, list[np.ndarray]]:
         forward, turn, _speed_scale = self._delta_to_safe_control(
             delta,
             engine.robot.heading,
             dt=self.data_dt,
         )
-        engine.set_control(forward, turn, self.bre)
+        bre = self.bre if bre_override is None else bool(bre_override)
+        engine.set_control(forward, turn, bre)
         points: list[np.ndarray] = []
         for _ in range(int(self.frame_stride)):
             robot_state, _human_state = engine.step()
@@ -3169,6 +3495,8 @@ class ModelPlanner:
         self.cached_nominal_delta_seq = None
         self.cached_safe_delta_seq = None
         self.cached_safety_info_seq = None
+        self.cached_interaction_labels_seq = None
+        self.cached_uses_stashed_compliance_plan = False
         self.cached_action_idx = 0
         self.frames_since_inference = 0
         self.cached_control = (0.0, 0.0)
@@ -3254,18 +3582,32 @@ class ModelPlanner:
                             self._synchronize_timing_device()
                             diffusion_start = time.perf_counter()
                         action_seq = self._predict_action()
+                        policy_action_seq = action_seq.copy()
+                        stashed_compliance_info = {
+                            "using_stashed_compliance_plan": False,
+                            "stashed_source": "policy",
+                            "stashed_len": int(
+                                len(self.stashed_guide_action_seq)
+                                if self.stashed_guide_action_seq is not None
+                                else 0
+                            ),
+                            "stashed_cursor": int(self.stashed_guide_cursor),
+                            "stashed_used_len": 0,
+                            "stashed_front_half_len": 0,
+                        }
+                        self.using_stashed_compliance_plan = False
                         diffusion_time_ms = 0.0
                         if diffusion_start is not None:
                             self._synchronize_timing_device()
                             diffusion_time_ms = (time.perf_counter() - diffusion_start) * 1000.0
-                        raw_nominal_delta_seq = self._action_seq_to_nominal_delta_seq(action_seq)
+                        raw_nominal_delta_seq = self._action_seq_to_nominal_delta_seq(policy_action_seq)
                         raw_nominal_path = self._deltas_to_path(
                             raw_nominal_delta_seq,
                             protect_robot=False,
                             protect_human=False,
                         )
                         raw_heading_delta = self._path_heading_delta(raw_nominal_path)
-                        self._write_planning_eval(action_seq, diffusion_time_ms)
+                        self._write_planning_eval(policy_action_seq, diffusion_time_ms)
                         if self.action_mode == "forward_heading":
                             obstacles = self.current_path_data.get("obstacles") if self.current_path_data else None
                             segments = (
@@ -3273,31 +3615,67 @@ class ModelPlanner:
                                 if self.current_path_data
                                 else None
                             )
+                            labels = self._interaction_labels_for_action_seq(len(policy_action_seq))
+                            if self._current_interaction_label() == "guide":
+                                self._stash_guide_action_seq(policy_action_seq, source="policy")
+                            elif np.any(self._compliance_mask_from_labels(labels)):
+                                action_seq, stashed_compliance_info = self._stashed_compliance_action_seq(
+                                    max(1, len(policy_action_seq) // 2),
+                                    policy_action_seq,
+                                )
+                                self.using_stashed_compliance_plan = bool(
+                                    stashed_compliance_info.get(
+                                        "using_stashed_compliance_plan",
+                                        False,
+                                    )
+                                )
                             action_seq = self._apply_interaction_aware_compliance_control(
                                 action_seq,
                                 obstacles=obstacles,
                                 segment_obstacles=segments,
                             )
                         self.cached_action_seq = action_seq
+                        self.cached_uses_stashed_compliance_plan = bool(
+                            stashed_compliance_info.get("using_stashed_compliance_plan", False)
+                        )
                         self.cached_action_idx = 0
                         self.frames_since_inference = 0
 
                         preview_action_seq = None
                         if self.action_mode == "forward_heading" and self.safety_mode != "off":
+                            preserve_heading_mask = None
+                            if self.cached_interaction_labels_seq is not None:
+                                preserve_heading_mask = np.isin(
+                                    np.asarray(self.cached_interaction_labels_seq, dtype=str),
+                                    np.array(["leash", "tether"], dtype=str),
+                                )
                             (
                                 nominal_delta_seq,
                                 safe_delta_seq,
                                 safety_info_seq,
-                            ) = self._apply_forward_heading_safety_filter(action_seq)
+                            ) = self._apply_forward_heading_safety_filter(
+                                action_seq,
+                                preserve_heading_mask=preserve_heading_mask,
+                            )
                             self.cached_nominal_delta_seq = nominal_delta_seq
                             self.cached_safe_delta_seq = safe_delta_seq
                             self.cached_safety_info_seq = safety_info_seq
+                            preview_bre_override = (
+                                False
+                                if preserve_heading_mask is not None
+                                and bool(np.any(preserve_heading_mask))
+                                else None
+                            )
                             self.nominal_planned_path = self._deltas_to_path(
                                 nominal_delta_seq,
                                 protect_robot=False,
                                 protect_human=False,
+                                bre_override=preview_bre_override,
                             )
-                            self.safe_planned_path = self._deltas_to_path(safe_delta_seq)
+                            self.safe_planned_path = self._deltas_to_path(
+                                safe_delta_seq,
+                                bre_override=preview_bre_override,
+                            )
                             self.planned_path = self.safe_planned_path
                         else:
                             self.cached_nominal_delta_seq = None
@@ -3332,6 +3710,34 @@ class ModelPlanner:
 
                                 "raw_first3": np.round(action_seq[:3], 4).tolist(),
                                 "raw_action_first3": np.round(action_seq[:3], 4).tolist(),
+                                "policy_raw_first3": np.round(policy_action_seq[:3], 4).tolist(),
+                                "policy_raw_forward_mean": float(np.mean(policy_action_seq[:, 0])),
+                                "policy_raw_heading_maxabs": float(
+                                    np.max(np.abs(policy_action_seq[:, 1]))
+                                    if policy_action_seq.shape[1] > 1
+                                    else 0.0
+                                ),
+                                "using_stashed_compliance_plan": bool(
+                                    stashed_compliance_info.get(
+                                        "using_stashed_compliance_plan",
+                                        False,
+                                    )
+                                ),
+                                "stashed_compliance_source": str(
+                                    stashed_compliance_info.get("stashed_source", "policy")
+                                ),
+                                "stashed_compliance_len": int(
+                                    stashed_compliance_info.get("stashed_len", 0)
+                                ),
+                                "stashed_compliance_cursor": int(
+                                    stashed_compliance_info.get("stashed_cursor", 0)
+                                ),
+                                "stashed_compliance_used_len": int(
+                                    stashed_compliance_info.get("stashed_used_len", 0)
+                                ),
+                                "stashed_compliance_front_half_len": int(
+                                    stashed_compliance_info.get("stashed_front_half_len", 0)
+                                ),
 
                                 "safety_mode": self.safety_mode,
                                 "safety_modified_steps": int(
@@ -3470,6 +3876,19 @@ class ModelPlanner:
                         action = self.cached_action_seq[action_idx]
                         # Hold the last action once the cached sequence is exhausted.
                         self.cached_action_idx = min(action_idx + 1, len(self.cached_action_seq) - 1)
+                        if (
+                            self.cached_uses_stashed_compliance_plan
+                            and self.stashed_guide_action_seq is not None
+                            and len(self.stashed_guide_action_seq) > 0
+                        ):
+                            stashed_front_half_len = max(
+                                1,
+                                len(self.stashed_guide_action_seq) // 2,
+                            )
+                            self.stashed_guide_cursor = min(
+                                int(self.stashed_guide_cursor) + 1,
+                                stashed_front_half_len,
+                            )
                     else:
                         action = np.zeros(self.action_dim)
 
@@ -3495,13 +3914,29 @@ class ModelPlanner:
                             nominal_delta, nominal_preview = self._forward_heading_action_to_nominal_delta(
                                 self.physics, action
                             )
-                            delta, _trial_engine, safety_info = self._safety_filter_delta(
-                                self.physics,
-                                nominal_delta,
-                                obstacles=obstacles,
-                                segment_obstacles=segments,
-                                nominal_preview=nominal_preview,
-                            )
+                            if self._current_interaction_label() in ("leash", "tether"):
+                                nominal_delta, nominal_preview = (
+                                    self._forward_heading_action_to_nominal_delta(
+                                        self.physics,
+                                        action,
+                                        bre_override=False,
+                                    )
+                                )
+                                delta, _trial_engine, safety_info = self._forward_only_safety_filter_delta(
+                                    self.physics,
+                                    nominal_delta,
+                                    obstacles=obstacles,
+                                    segment_obstacles=segments,
+                                    bre_override=False,
+                                )
+                            else:
+                                delta, _trial_engine, safety_info = self._safety_filter_delta(
+                                    self.physics,
+                                    nominal_delta,
+                                    obstacles=obstacles,
+                                    segment_obstacles=segments,
+                                    nominal_preview=nominal_preview,
+                                )
                         self._update_episode_safety_stats(safety_info)
                         forward, turn, speed_scale = self._delta_to_safe_control(
                             delta,
@@ -3560,6 +3995,8 @@ class ModelPlanner:
                 self.cached_nominal_delta_seq = None
                 self.cached_safe_delta_seq = None
                 self.cached_safety_info_seq = None
+                self.cached_interaction_labels_seq = None
+                self.cached_uses_stashed_compliance_plan = False
                 self.cached_action_idx = 0
                 self.frames_since_inference = 0
                 self.cached_control = (forward, turn)

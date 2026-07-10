@@ -57,6 +57,9 @@ class ComplianceControlConfig:
     heading_clip_scale: float = 0.35
     heading_damping: float = 0.8
     heading_mix: float = 0.7
+    heading_control: bool = True
+    forward_only_slowdown: bool = False
+    preserve_heading: bool = False
     curvature_slowdown: bool = True
     curvature_scale: float = 0.7
     min_speed_scale: float = 0.25
@@ -423,7 +426,9 @@ def apply_bre_compliance_control(
         before_action = action.copy()
         link = sim.robot.position - sim.human.position
         link_length = float(np.linalg.norm(link))
-        if link_length > 1e-6:
+        if config.preserve_heading:
+            action[1] = 0.0
+        elif config.heading_control and link_length > 1e-6:
             link_dir = link / link_length
             lateral_dir = np.array([-link_dir[1], link_dir[0]], dtype=np.float32)
             relative_velocity = sim.robot.velocity - sim.human.velocity
@@ -436,7 +441,11 @@ def apply_bre_compliance_control(
             )
             action[1] = float(np.clip(action[1], -max_heading_delta, max_heading_delta))
 
-        action[0] = float(np.clip(action[0], min_forward, max_forward))
+        if config.forward_only_slowdown:
+            forward = float(action[0])
+            action[0] = float(np.clip(forward, 0.0, max_forward))
+        else:
+            action[0] = float(np.clip(action[0], min_forward, max_forward))
         nominal_delta, nominal_preview = _forward_heading_action_to_nominal_delta(
             sim,
             action,

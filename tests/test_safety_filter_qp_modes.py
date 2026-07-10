@@ -569,8 +569,7 @@ def plot_scenario(
     obs_stride = max(1, int(np.ceil(len(obs_cloud_world) / 3500.0))) if len(obs_cloud_world) else 1
     raw_cloud_for_plot = raw_cloud_world[::raw_stride]
     obs_cloud_for_plot = obs_cloud_world[::obs_stride]
-    for ax, (mode, title) in zip(axes, panels):
-        ax.set_title(title, fontsize=13, fontweight="bold")
+    for ax, (mode, _title) in zip(axes, panels):
         ax.set_facecolor("#F8FAFC")
         ax.plot(
             scenario.reference_path[:, 0],
@@ -727,9 +726,8 @@ def plot_scenario(
 
     handles, labels = axes[0].get_legend_handles_labels()
     fig.legend(handles, labels, loc="lower center", ncol=4, frameon=False, fontsize=9)
-    fig.suptitle("Front-Pull Safety Filter Scenario: Raw vs Robot QP vs Human-Aware QP", fontsize=15)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_path, dpi=180)
+    fig.savefig(output_path, dpi=300)
     plt.close(fig)
 
 
