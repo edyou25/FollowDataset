@@ -27,6 +27,22 @@ from diffusion_policy.common.guide_mid360 import (  # noqa: E402
     encode_mid360_scan_from_pointcloud,
 )
 from src.safety_filter import QPSafetyFilter  # noqa: E402
+from tests.plot_styles import (  # noqa: E402
+    GRID_COLOR,
+    HUMAN_COLOR,
+    LEASH_COLOR,
+    OBSTACLE_EDGE_COLOR,
+    OBSTACLE_FACE_COLOR,
+    OBSERVATION_CLOUD_COLOR,
+    PANEL_FACE_COLOR,
+    RAW_CLOUD_COLOR,
+    REFERENCE_COLOR,
+    ROBOT_COLOR,
+    SAFETY_RING_COLOR,
+    SPINE_COLOR,
+    WALL_COLOR,
+    algorithm_color,
+)
 
 
 ARTIFACT_DIR = Path(__file__).resolve().parent / "artifacts" / "safety_filter_qp"
@@ -560,21 +576,17 @@ def plot_scenario(
         ("robot_qp", "Robot QP"),
         ("human_robot_qp", "Human-Aware QP"),
     ]
-    colors = {
-        "raw_diffusion": ("#991B1B", "#EA580C"),
-        "robot_qp": ("#581C87", "#16A34A"),
-        "human_robot_qp": ("#1D4ED8", "#0F766E"),
-    }
     raw_stride = max(1, int(np.ceil(len(raw_cloud_world) / 6000.0))) if len(raw_cloud_world) else 1
     obs_stride = max(1, int(np.ceil(len(obs_cloud_world) / 3500.0))) if len(obs_cloud_world) else 1
     raw_cloud_for_plot = raw_cloud_world[::raw_stride]
     obs_cloud_for_plot = obs_cloud_world[::obs_stride]
     for ax, (mode, _title) in zip(axes, panels):
-        ax.set_facecolor("#F8FAFC")
+        ax.set_facecolor(PANEL_FACE_COLOR)
+        ax.set_title(_title, color=algorithm_color(mode))
         ax.plot(
             scenario.reference_path[:, 0],
             scenario.reference_path[:, 1],
-            color="#6B7280",
+            color=REFERENCE_COLOR,
             linewidth=1.2,
             linestyle="--",
             label="reference centerline",
@@ -584,7 +596,7 @@ def plot_scenario(
             ax.plot(
                 [seg[0], seg[2]],
                 [seg[1], seg[3]],
-                color="#F59E0B",
+                color=WALL_COLOR,
                 linewidth=3.0,
                 label="vector map walls" if seg_idx == 0 else None,
                 zorder=1,
@@ -594,7 +606,8 @@ def plot_scenario(
                 plt.Circle(
                     obs[:2],
                     obs[2],
-                    color="#7C2D12",
+                    facecolor=OBSTACLE_FACE_COLOR,
+                    edgecolor=OBSTACLE_EDGE_COLOR,
                     alpha=0.30,
                     label="vector map circles" if obs_idx == 0 else None,
                     zorder=1,
@@ -606,7 +619,7 @@ def plot_scenario(
                     obs[2] + scenario.human_radius,
                     fill=False,
                     linestyle=":",
-                    color="#9CA3AF",
+                    color=SAFETY_RING_COLOR,
                     linewidth=1.1,
                     zorder=1,
                 )
@@ -617,7 +630,7 @@ def plot_scenario(
                 raw_cloud_for_plot[:, 0],
                 raw_cloud_for_plot[:, 1],
                 s=3,
-                c="#EF4444",
+                c=RAW_CLOUD_COLOR,
                 alpha=0.22,
                 label="raw Mid360 point cloud",
                 zorder=2,
@@ -627,20 +640,19 @@ def plot_scenario(
                 obs_cloud_for_plot[:, 0],
                 obs_cloud_for_plot[:, 1],
                 s=6,
-                c="#2563EB",
+                c=OBSERVATION_CLOUD_COLOR,
                 alpha=0.58,
                 label="processed observation cloud",
                 zorder=3,
             )
 
-        robot_color, human_color = colors[mode]
         result = rollouts[mode]
         robot_path = result["robot_path"]
         human_path = result["human_path"]
         ax.plot(
             [robot_path[0, 0], human_path[0, 0]],
             [robot_path[0, 1], human_path[0, 1]],
-            color="#111827",
+            color=LEASH_COLOR,
             linewidth=1.4,
             linestyle="-.",
             alpha=0.85,
@@ -650,7 +662,7 @@ def plot_scenario(
         ax.plot(
             robot_path[:, 0],
             robot_path[:, 1],
-            color=robot_color,
+            color=ROBOT_COLOR,
             linewidth=2.4,
             marker="o",
             markersize=3.2,
@@ -660,7 +672,7 @@ def plot_scenario(
         ax.plot(
             human_path[:, 0],
             human_path[:, 1],
-            color=human_color,
+            color=HUMAN_COLOR,
             linewidth=2.4,
             marker="s",
             markersize=3.0,
@@ -671,7 +683,7 @@ def plot_scenario(
             [scenario.robot_start[0]],
             [scenario.robot_start[1]],
             s=90,
-            c=robot_color,
+            c=ROBOT_COLOR,
             edgecolors="white",
             linewidths=1.0,
             zorder=5,
@@ -681,14 +693,14 @@ def plot_scenario(
             float(scenario.robot_start[1]) + 0.08,
             "robot front",
             fontsize=8,
-            color=robot_color,
+            color=ROBOT_COLOR,
             zorder=6,
         )
         ax.scatter(
             [scenario.human_start[0]],
             [scenario.human_start[1]],
             s=90,
-            c=human_color,
+            c=HUMAN_COLOR,
             edgecolors="white",
             linewidths=1.0,
             zorder=5,
@@ -698,7 +710,7 @@ def plot_scenario(
             float(scenario.human_start[1]) - 0.16,
             "human rear",
             fontsize=8,
-            color=human_color,
+            color=HUMAN_COLOR,
             zorder=6,
         )
         mode_summary = summary["modes"][mode]
@@ -715,12 +727,12 @@ def plot_scenario(
             ha="left",
             va="top",
             fontsize=9,
-            bbox={"facecolor": "white", "edgecolor": "#D1D5DB", "alpha": 0.92},
+            bbox={"facecolor": "white", "edgecolor": SPINE_COLOR, "alpha": 0.92},
         )
         ax.set_aspect("equal", adjustable="box")
         ax.set_xlim(-1.05, 4.45)
         ax.set_ylim(-1.10, 1.25)
-        ax.grid(True, color="#E5E7EB", linewidth=0.8)
+        ax.grid(True, color=GRID_COLOR, linewidth=0.8)
         ax.set_xlabel("x [m]")
         ax.set_ylabel("y [m]")
 

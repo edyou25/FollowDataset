@@ -27,6 +27,9 @@ class Visualizer:
         'robot_radius': (255, 220, 120),
         'human': (150, 200, 255),        # Human - light blue
         'human_radius': (180, 230, 255),
+        'human_detection': (190, 145, 255),  # All detector candidates - violet
+        'human_best': (70, 255, 120),        # Selected detector candidate - green
+        'human_detection_sector': (80, 205, 255),  # Rear detector ROI - cyan
         'leash': (200, 200, 200),        # Leash
         'start': (50, 255, 50),          # Start - bright green
         'end': (255, 50, 50),            # End - bright red
@@ -47,8 +50,8 @@ class Visualizer:
     
     def __init__(
         self,
-        width: int = 2400,  # 从 1200 增加到 1600
-        height: int = 1600,  # 从 800 增加到 1000
+        width: int = 2400,  # ä»Ž 1200 å¢žåŠ åˆ° 1600
+        height: int = 1600,  # ä»Ž 800 å¢žåŠ åˆ° 1000
         pixels_per_meter: float = 12.0
     ):
         self.width = width
@@ -82,6 +85,8 @@ class Visualizer:
             "point_cloud": True,
             "robot_trajectory": True,
             "human_trajectory": True,
+            "human_detections": True,
+            "human_detection_sector": True,
             "obstacles": True,
             "segment_obstacles": True,
             "obs_obstacles": True,
@@ -207,9 +212,19 @@ class Visualizer:
             {"key": "nominal_planned_path", "label": "Diffusion Raw", "color": self.COLORS["path_plan_raw"]},
             {"key": "safe_planned_path", "label": "QP Path", "color": self.COLORS["path_plan_qp"]},
             {"key": "lookahead_points", "label": "Lookahead", "color": self.COLORS["lookahead"]},
-            {"key": "point_cloud", "label": "PointCloud XY", "color": self.COLORS["point_cloud"]},
+            {"key": "point_cloud", "label": "Range Points XY", "color": self.COLORS["point_cloud"]},
             {"key": "robot_trajectory", "label": "Robot Trail", "color": self.COLORS["path_robot"]},
             {"key": "human_trajectory", "label": "Human Trail", "color": self.COLORS["path_human"]},
+            {
+                "key": "human_detections",
+                "label": "Detections (BEST=green)",
+                "color": self.COLORS["human_detection"],
+            },
+            {
+                "key": "human_detection_sector",
+                "label": "Rear Detector ROI",
+                "color": self.COLORS["human_detection_sector"],
+            },
             {"key": "obstacles", "label": "Circle Obstacles", "color": self.COLORS["obstacle"]},
             {"key": "segment_obstacles", "label": "Wall Segments", "color": self.COLORS["obstacle_segment"]},
             {"key": "obs_obstacles", "label": "Obs Highlight", "color": self.COLORS["obstacle_obs"]},
@@ -686,12 +701,121 @@ class Visualizer:
         
         pygame.draw.polygon(self.screen, self.COLORS['robot'], [front, left, right])
         pygame.draw.polygon(self.screen, (255, 255, 255), [front, left, right], 2)
+
+    def draw_human_detection_sector(
+        self,
+        robot_position: np.ndarray,
+        robot_heading: float,
+        radius: float,
+        aperture_deg: float,
+    ):
+        """Draw a rear-facing detector ROI with a transparent sector fill."""
+        radius = float(radius)
+        aperture_deg = float(aperture_deg)
+        if (
+            radius <= 0.0
+            or aperture_deg <= 0.0
+            or aperture_deg > 360.0
+        ):
+            return
+
+        robot_position = np.asarray(robot_position, dtype=np.float32).reshape(2)
+        center_angle = float(robot_heading) + np.pi
+        half_angle = 0.5 * np.deg2rad(aperture_deg)
+        arc_sample_count = max(16, int(np.ceil(aperture_deg / 2.0)) + 1)
+        arc_angles = np.linspace(
+            center_angle - half_angle,
+            center_angle + half_angle,
+            arc_sample_count,
+        )
+        arc_world = robot_position[None, :] + radius * np.column_stack(
+            (np.cos(arc_angles), np.sin(arc_angles))
+        )
+        center_screen = self.world_to_screen(robot_position)
+        arc_screen = [self.world_to_screen(point) for point in arc_world]
+        polygon_points = [center_screen, *arc_screen]
+
+        color = self.COLORS["human_detection_sector"]
+        x_coordinates = [point[0] for point in polygon_points]
+        y_coordinates = [point[1] for point in polygon_points]
+        padding = 3
+        overlay_rect = pygame.Rect(
+            min(x_coordinates) - padding,
+            min(y_coordinates) - padding,
+            max(x_coordinates) - min(x_coordinates) + 2 * padding + 1,
+            max(y_coordinates) - min(y_coordinates) + 2 * padding + 1,
+        )
+        overlay = pygame.Surface(
+            overlay_rect.size,
+            flags=pygame.SRCALPHA,
+        )
+        local_polygon = [
+            (point[0] - overlay_rect.left, point[1] - overlay_rect.top)
+            for point in polygon_points
+        ]
+        pygame.draw.polygon(overlay, (*color, 42), local_polygon)
+        self.screen.blit(overlay, overlay_rect.topleft)
+
+        pygame.draw.line(self.screen, color, center_screen, arc_screen[0], 2)
+        pygame.draw.line(self.screen, color, center_screen, arc_screen[-1], 2)
+        pygame.draw.lines(self.screen, color, False, arc_screen, 2)
     
     def draw_human(self, position: np.ndarray):
         """Draw human (circle)"""
         screen_pos = self.world_to_screen(position)
         pygame.draw.circle(self.screen, self.COLORS['human'], screen_pos, 10)
         pygame.draw.circle(self.screen, (255, 255, 255), screen_pos, 10, 2)
+
+    def draw_human_detections(
+        self,
+        positions: np.ndarray,
+        best_candidate_index: Optional[int] = None,
+    ):
+        """Draw every detected person and emphasize the selected candidate."""
+        positions = np.asarray(positions, dtype=np.float32)
+        if positions.size == 0:
+            return
+        positions = positions.reshape(-1, 2)
+
+        best_index = None
+        if best_candidate_index is not None:
+            candidate_index = int(best_candidate_index)
+            if 0 <= candidate_index < len(positions):
+                best_index = candidate_index
+
+        for index, position in enumerate(positions):
+            screen_pos = self.world_to_screen(position)
+            is_best = index == best_index
+            color = (
+                self.COLORS["human_best"]
+                if is_best
+                else self.COLORS["human_detection"]
+            )
+
+            if is_best:
+                # A filled center plus two rings keeps BEST visible over the
+                # normal tracked-human marker at the same world position.
+                pygame.draw.circle(self.screen, color, screen_pos, 7)
+                pygame.draw.circle(self.screen, color, screen_pos, 14, 4)
+                pygame.draw.circle(self.screen, (255, 255, 255), screen_pos, 17, 2)
+                label = f"BEST P{index + 1}"
+                label_color = self.COLORS["human_best"]
+                label_offset = (20, -16)
+            else:
+                pygame.draw.circle(self.screen, color, screen_pos, 8, 2)
+                pygame.draw.circle(self.screen, color, screen_pos, 3)
+                label = f"P{index + 1}"
+                label_color = self.COLORS["human_detection"]
+                label_offset = (11, -10)
+
+            text = self.font.render(label, True, label_color)
+            self.screen.blit(
+                text,
+                (
+                    screen_pos[0] + label_offset[0],
+                    screen_pos[1] + label_offset[1],
+                ),
+            )
 
     def draw_radius(self, position: np.ndarray, radius: float, color: tuple, width: int = 2):
         if radius is None or radius <= 0:
@@ -731,9 +855,48 @@ class Visualizer:
         mode = info.get('mode')
         if mode:
             texts.append(f"Mode: {mode}")
+        range_source = info.get("range_source")
+        if range_source:
+            range_label = (
+                "LaserScan" if range_source == "laser_scan" else "PointCloud"
+            )
+            range_topic = info.get("range_topic", "")
+            range_count = int(info.get("range_point_count", 0))
+            range_age = float(info.get("range_age", float("inf")))
+            age_label = f"{range_age:.2f}s" if np.isfinite(range_age) else "n/a"
+            texts.append(
+                f"Range: {range_label} | {range_topic} | "
+                f"{range_count} pts | Age: {age_label}"
+            )
         interaction_label = info.get('interaction_label')
         if interaction_label:
             texts.append(f"Interaction: {interaction_label}")
+        if info.get("human_source") == "detector":
+            detection_count = int(info.get("human_detection_count", 0))
+            raw_detection_count = int(
+                info.get("human_detection_raw_count", detection_count)
+            )
+            best_index = info.get("human_best_candidate_index")
+            best_label = (
+                f"P{int(best_index) + 1}"
+                if best_index is not None
+                else "none"
+            )
+            detection_age = float(info.get("human_detection_age", float("inf")))
+            age_label = f"{detection_age:.2f}s" if np.isfinite(detection_age) else "n/a"
+            texts.append(
+                f"Rear ROI detections: {detection_count}/{raw_detection_count} "
+                f"| Best: {best_label} | Age: {age_label}"
+            )
+            sector_range = float(info.get("human_rear_sector_range", 0.0))
+            sector_angle = float(
+                info.get("human_rear_sector_angle_deg", 0.0)
+            )
+            if sector_range > 0.0 and sector_angle > 0.0:
+                texts.append(
+                    f"Rear ROI: {sector_angle:g} deg total "
+                    f"(+/-{0.5 * sector_angle:g}) | <= {sector_range:g} m"
+                )
         if 'compliance_steps' in info and 'compliance_total_steps' in info:
             texts.append(
                 f"Compliance Steps: {int(info.get('compliance_steps', 0))}/"
@@ -750,7 +913,7 @@ class Visualizer:
 
         # Recording status
         if info.get('recording', False):
-            rec_text = self.font_large.render("● REC", True, self.COLORS['recording'])
+            rec_text = self.font_large.render("â— REC", True, self.COLORS['recording'])
             self.screen.blit(rec_text, (self.width - 100, 15))
         
         # Score display (right side)
@@ -861,7 +1024,11 @@ class Visualizer:
         end_pos: Optional[np.ndarray] = None,
         leash_tension: float = 0.0,
         info: Optional[dict] = None,
-        flip: bool = True
+        flip: bool = True,
+        detected_humans: Optional[np.ndarray] = None,
+        best_human_index: Optional[int] = None,
+        human_detection_sector_range: Optional[float] = None,
+        human_detection_sector_angle_deg: Optional[float] = None,
     ):
         """Render one frame. Set flip=False to manually control display update."""
         surface = pygame.display.get_surface()
@@ -880,48 +1047,59 @@ class Visualizer:
         # Draw grid
         if self.layer_visibility.get("grid", True):
             self.draw_grid()
-        
-        # Draw reference path
-        if reference_path is not None and len(reference_path) > 0:
-            if self.layer_visibility.get("reference_path", True):
-                self.draw_path(reference_path, self.COLORS['path_ref'], 3)
-
-        # Draw obstacles
-        if obstacles is not None and len(obstacles) > 0:
-            if self.layer_visibility.get("obstacles", True):
-                self.draw_obstacles(obstacles, obstacle_inflation)
-
-        # Draw segment obstacles
-        if segment_obstacles is not None and len(segment_obstacles) > 0:
-            if self.layer_visibility.get("segment_obstacles", True):
-                self.draw_segments(segment_obstacles, obstacle_inflation)
-
-        # Highlight obstacles used as observation
         if (
-            (obs_obstacles is not None and len(obs_obstacles) > 0)
-            or (obs_segment_obstacles is not None and len(obs_segment_obstacles) > 0)
+            human_detection_sector_range is not None
+            and human_detection_sector_angle_deg is not None
+            and self.layer_visibility.get("human_detection_sector", True)
         ):
-            if self.layer_visibility.get("obs_obstacles", True):
-                self.draw_observation_obstacles(obs_obstacles, obs_segment_obstacles)
-        if obs_segment_closest_points is not None and len(obs_segment_closest_points) > 0:
-            if self.layer_visibility.get("obs_segment_vectors", True):
-                self.draw_observation_segment_vectors(
-                    robot_pos, obs_segment_closest_points, obs_segment_dirs
-                )
-        if (
-            human_radius is not None
-            and (
+            self.draw_human_detection_sector(
+                robot_pos,
+                robot_heading,
+                human_detection_sector_range,
+                human_detection_sector_angle_deg,
+            )
+        if False:
+            # Draw reference path
+            if reference_path is not None and len(reference_path) > 0:
+                if self.layer_visibility.get("reference_path", True):
+                    self.draw_path(reference_path, self.COLORS['path_ref'], 3)
+
+            # Draw obstacles
+            if obstacles is not None and len(obstacles) > 0:
+                if self.layer_visibility.get("obstacles", True):
+                    self.draw_obstacles(obstacles, obstacle_inflation)
+
+            # Draw segment obstacles
+            if segment_obstacles is not None and len(segment_obstacles) > 0:
+                if self.layer_visibility.get("segment_obstacles", True):
+                    self.draw_segments(segment_obstacles, obstacle_inflation)
+
+            # Highlight obstacles used as observation
+            if (
                 (obs_obstacles is not None and len(obs_obstacles) > 0)
                 or (obs_segment_obstacles is not None and len(obs_segment_obstacles) > 0)
-            )
-        ):
-            if self.layer_visibility.get("human_clearance", True):
-                self.draw_human_clearance(
-                    human_pos=human_pos,
-                    human_radius=human_radius,
-                    obs_obstacles=obs_obstacles,
-                    obs_segment_obstacles=obs_segment_obstacles,
+            ):
+                if self.layer_visibility.get("obs_obstacles", True):
+                    self.draw_observation_obstacles(obs_obstacles, obs_segment_obstacles)
+            if obs_segment_closest_points is not None and len(obs_segment_closest_points) > 0:
+                if self.layer_visibility.get("obs_segment_vectors", True):
+                    self.draw_observation_segment_vectors(
+                        robot_pos, obs_segment_closest_points, obs_segment_dirs
+                    )
+            if (
+                human_radius is not None
+                and (
+                    (obs_obstacles is not None and len(obs_obstacles) > 0)
+                    or (obs_segment_obstacles is not None and len(obs_segment_obstacles) > 0)
                 )
+            ):
+                if self.layer_visibility.get("human_clearance", True):
+                    self.draw_human_clearance(
+                        human_pos=human_pos,
+                        human_radius=human_radius,
+                        obs_obstacles=obs_obstacles,
+                        obs_segment_obstacles=obs_segment_obstacles,
+                    )
 
         # Draw planning overlays
         if nominal_planned_path is not None and len(nominal_planned_path) > 1:
@@ -940,10 +1118,10 @@ class Visualizer:
             ):
                 self.draw_path(planned_path, self.COLORS['path_plan'], 2)
 
-        # Draw lookahead points
-        if lookahead_points is not None and len(lookahead_points) > 0:
-            if self.layer_visibility.get("lookahead_points", True):
-                self.draw_points(lookahead_points, self.COLORS['lookahead'], 5)
+        # # Draw lookahead points
+        # if lookahead_points is not None and len(lookahead_points) > 0:
+        #     if self.layer_visibility.get("lookahead_points", True):
+        #         self.draw_points(lookahead_points, self.COLORS['lookahead'], 5)
 
         if point_cloud is not None and len(point_cloud) > 0:
             if self.layer_visibility.get("point_cloud", True):
@@ -963,9 +1141,9 @@ class Visualizer:
             if self.layer_visibility.get("start_end", True):
                 self.draw_marker(start_pos, self.COLORS['start'], 10, "Start")
         
-        if end_pos is not None:
-            if self.layer_visibility.get("start_end", True):
-                self.draw_marker(end_pos, self.COLORS['end'], 10, "End")
+        # if end_pos is not None:
+        #     if self.layer_visibility.get("start_end", True):
+        #         self.draw_marker(end_pos, self.COLORS['end'], 10, "End")
         
         # Draw leash
         if self.layer_visibility.get("leash", True):
@@ -976,6 +1154,15 @@ class Visualizer:
             self.draw_radius(robot_pos, robot_radius, self.COLORS['robot_radius'])
             self.draw_radius(human_pos, human_radius, self.COLORS['human_radius'])
         self.draw_human(human_pos)
+        if (
+            detected_humans is not None
+            and len(detected_humans) > 0
+            and self.layer_visibility.get("human_detections", True)
+        ):
+            self.draw_human_detections(
+                detected_humans,
+                best_candidate_index=best_human_index,
+            )
         self.draw_robot(robot_pos, robot_heading)
         
         # Draw UI

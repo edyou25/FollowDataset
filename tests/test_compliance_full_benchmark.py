@@ -39,6 +39,25 @@ from src.compliance_control import (  # noqa: E402
 from src.path_generator import PathGenerator  # noqa: E402
 from src.physics import PhysicsEngine  # noqa: E402
 from src.safety_filter import QPSafetyFilter  # noqa: E402
+from tests.plot_styles import (  # noqa: E402
+    COLLISION_COLOR,
+    DEFAULT_LINE_COLOR,
+    GOAL_COLOR,
+    GRID_COLOR,
+    MARGIN_COLOR,
+    OBSTACLE_EDGE_COLOR,
+    OBSTACLE_FACE_COLOR,
+    OBSTACLE_HIT_EDGE_COLOR,
+    OBSTACLE_HIT_FACE_COLOR,
+    REFERENCE_COLOR,
+    ROBOT_COLOR,
+    START_COLOR,
+    STATE_COLORS,
+    WALL_COLOR,
+    WARNING_COLOR,
+    algorithm_color,
+    state_span_color,
+)
 
 
 ARTIFACT_DIR = (
@@ -55,10 +74,8 @@ MODE_LABELS = {
     "ours": "ours",
 }
 MODE_COLORS = {
-    "diffusion": "#7F1D1D",
-    "diffusion_qp": "#B45309",
-    "safe_compliance": "#581C87",
-    "ours": "#1D4ED8",
+    mode: algorithm_color(mode)
+    for mode in MODE_ORDER
 }
 
 
@@ -779,7 +796,7 @@ def plot_aggregate(aggregate: dict, output_path: Path) -> None:
             alpha=0.88,
         )
         ax.set_ylabel(ylabel)
-        ax.grid(True, axis="y", color="#E5E7EB", linewidth=0.8)
+        ax.grid(True, axis="y", color=GRID_COLOR, linewidth=0.8)
         ax.tick_params(axis="x", labelsize=9)
         if key.endswith("_rate"):
             ax.set_ylim(0.0, 1.05)
@@ -826,7 +843,7 @@ def plot_scenario_breakdown(aggregate: dict, output_path: Path) -> None:
         ax.set_ylabel(ylabel)
         ax.set_xticks(x)
         ax.set_xticklabels([label for _name, label in scenario_items])
-        ax.grid(True, axis="y", color="#E5E7EB", linewidth=0.8)
+        ax.grid(True, axis="y", color=GRID_COLOR, linewidth=0.8)
         if key.endswith("_rate"):
             ax.set_ylim(0.0, 1.05)
     axes.ravel()[1].legend(frameon=False, ncol=2, loc="upper right")
@@ -850,12 +867,12 @@ def plot_representative_case(
     path = np.asarray(path_data["path"], dtype=np.float32)
     obstacles = np.asarray(path_data.get("obstacles", []), dtype=np.float32)
     segments = np.asarray(path_data.get("segment_obstacles", []), dtype=np.float32)
-    ax.plot(path[:, 0], path[:, 1], "--", color="#111827", linewidth=1.2, label="reference")
+    ax.plot(path[:, 0], path[:, 1], "--", color=REFERENCE_COLOR, linewidth=1.2, label="reference")
     for seg_idx, seg in enumerate(segments):
         ax.plot(
             [seg[0], seg[2]],
             [seg[1], seg[3]],
-            color="#9CA3AF",
+            color=WALL_COLOR,
             linewidth=1.2,
             label="corridor wall" if seg_idx == 0 else None,
         )
@@ -864,7 +881,7 @@ def plot_representative_case(
             plt.Circle(
                 obs[:2],
                 obs[2],
-                color="#7C2D12",
+                color=OBSTACLE_EDGE_COLOR,
                 alpha=0.18,
                 label="circle obstacle" if obs_idx == 0 else None,
             )
@@ -898,7 +915,7 @@ def plot_representative_case(
     ax.set_aspect("equal", adjustable="box")
     ax.set_xlabel("x [m]")
     ax.set_ylabel("y [m]")
-    ax.grid(True, color="#E5E7EB", linewidth=0.8)
+    ax.grid(True, color=GRID_COLOR, linewidth=0.8)
     ax.legend(frameon=False, fontsize=8, loc="center left", bbox_to_anchor=(1.01, 0.5))
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, dpi=300)
@@ -911,7 +928,7 @@ def plot_labeled_human_path(
     labels: np.ndarray,
     config: BenchmarkConfig,
 ) -> None:
-    colors = {"guide": "#2563EB", "leash": "#EA580C", "tether": "#EA580C"}
+    colors = STATE_COLORS
     names = {"guide": "human path: guide", "leash": "human path: leash", "tether": "human path: leash"}
     used: set[str] = set()
     point_labels = []
@@ -928,7 +945,7 @@ def plot_labeled_human_path(
         ax.plot(
             human_path[start:end, 0],
             human_path[start:end, 1],
-            color=colors.get(label, "#6B7280"),
+            color=colors.get(label, DEFAULT_LINE_COLOR),
             linewidth=2.1,
             alpha=0.88,
             label=names.get(label, label) if label not in used else None,
@@ -977,7 +994,7 @@ def plot_scene_environment(
     ax.plot(
         path[:, 0],
         path[:, 1],
-        color="#111827",
+        color=REFERENCE_COLOR,
         linestyle="--",
         linewidth=0.75,
         alpha=reference_alpha,
@@ -987,7 +1004,7 @@ def plot_scene_environment(
         ax.plot(
             [seg[0], seg[2]],
             [seg[1], seg[3]],
-            color="#9CA3AF",
+            color=WALL_COLOR,
             linewidth=0.75,
             alpha=0.90,
             zorder=0,
@@ -998,8 +1015,8 @@ def plot_scene_environment(
             plt.Circle(
                 obs[:2],
                 obs[2],
-                facecolor="#B45309",
-                edgecolor="#7C2D12",
+                facecolor=OBSTACLE_FACE_COLOR,
+                edgecolor=OBSTACLE_EDGE_COLOR,
                 linewidth=0.35,
                 alpha=0.30,
                 zorder=2,
@@ -1014,7 +1031,7 @@ def plot_labeled_reference_path(
     path: np.ndarray,
     labels: np.ndarray,
 ) -> None:
-    colors = {"guide": "#2563EB", "leash": "#EA580C", "tether": "#EA580C"}
+    colors = STATE_COLORS
     path = np.asarray(path, dtype=np.float32)
     labels = np.asarray(labels, dtype=object)
     if len(path) < 2 or len(labels) == 0:
@@ -1026,7 +1043,7 @@ def plot_labeled_reference_path(
         ax.plot(
             path[segment_idx:segment_idx + 2, 0],
             path[segment_idx:segment_idx + 2, 1],
-            color=colors.get(label, "#6B7280"),
+            color=colors.get(label, DEFAULT_LINE_COLOR),
             linewidth=1.65,
             alpha=0.92,
             solid_capstyle="round",
@@ -1055,10 +1072,10 @@ def format_dense_scene_axis(
     ax.set_aspect("equal", adjustable="box")
     ax.set_xticks([])
     ax.set_yticks([])
-    ax.grid(True, color="#E5E7EB", linewidth=0.35)
+    ax.grid(True, color=GRID_COLOR, linewidth=0.35)
     for spine in ax.spines.values():
         spine.set_linewidth(0.55)
-        spine.set_color("#D1D5DB")
+        spine.set_color(WALL_COLOR)
 
 
 def plot_paper_scene_grid(
@@ -1087,8 +1104,8 @@ def plot_paper_scene_grid(
         train_ax = axes[0, col_idx]
         train_points = plot_scene_environment(train_ax, path_data, reference_alpha=0.28)
         plot_labeled_reference_path(train_ax, path, labels)
-        train_ax.scatter(path[0, 0], path[0, 1], s=12, color="#059669", zorder=5)
-        train_ax.scatter(path[-1, 0], path[-1, 1], s=15, marker="*", color="#111827", zorder=5)
+        train_ax.scatter(path[0, 0], path[0, 1], s=12, color=START_COLOR, zorder=5)
+        train_ax.scatter(path[-1, 0], path[-1, 1], s=15, marker="*", color=GOAL_COLOR, zorder=5)
         format_dense_scene_axis(
             train_ax,
             train_points,
@@ -1102,14 +1119,14 @@ def plot_paper_scene_grid(
         exp_ax.plot(
             robot_path[:, 0],
             robot_path[:, 1],
-            color="#111827",
+            color=ROBOT_COLOR,
             linewidth=0.95,
             alpha=0.62,
             zorder=3,
         )
         plot_labeled_human_path(exp_ax, human_path, labels, config)
-        exp_ax.scatter(human_path[0, 0], human_path[0, 1], s=12, color="#059669", zorder=5)
-        exp_ax.scatter(human_path[-1, 0], human_path[-1, 1], s=15, marker="*", color="#111827", zorder=5)
+        exp_ax.scatter(human_path[0, 0], human_path[0, 1], s=12, color=START_COLOR, zorder=5)
+        exp_ax.scatter(human_path[-1, 0], human_path[-1, 1], s=15, marker="*", color=GOAL_COLOR, zorder=5)
         exp_points.extend([robot_path, human_path])
         format_dense_scene_axis(
             exp_ax,
@@ -1119,11 +1136,11 @@ def plot_paper_scene_grid(
     axes[0, 0].set_ylabel("training\nscenes", fontsize=9)
     axes[1, 0].set_ylabel("experiment\nrollouts", fontsize=9)
     legend_handles = [
-        Line2D([0], [0], color="#2563EB", linewidth=2.0, label="guide label / human path"),
-        Line2D([0], [0], color="#EA580C", linewidth=2.0, label="leash label / human path"),
-        Line2D([0], [0], color="#111827", linewidth=1.0, alpha=0.65, label="robot path"),
-        Line2D([0], [0], color="#111827", linestyle="--", linewidth=0.9, alpha=0.45, label="reference path"),
-        Line2D([0], [0], marker="o", color="none", markerfacecolor="#B45309", alpha=0.55, label="obstacle"),
+        Line2D([0], [0], color=STATE_COLORS["guide"], linewidth=2.0, label="guide label / human path"),
+        Line2D([0], [0], color=STATE_COLORS["leash"], linewidth=2.0, label="leash label / human path"),
+        Line2D([0], [0], color=ROBOT_COLOR, linewidth=1.0, alpha=0.65, label="robot path"),
+        Line2D([0], [0], color=REFERENCE_COLOR, linestyle="--", linewidth=0.9, alpha=0.45, label="reference path"),
+        Line2D([0], [0], marker="o", color="none", markerfacecolor=OBSTACLE_FACE_COLOR, alpha=0.55, label="obstacle"),
     ]
     fig.legend(
         handles=legend_handles,
@@ -1145,7 +1162,6 @@ def shade_interaction_spans(
     config: BenchmarkConfig,
     duration_sec: float,
 ) -> None:
-    colors = {"guide": "#DBEAFE", "leash": "#FFEDD5", "tether": "#FFEDD5"}
     start = 0
     while start < len(labels):
         label = str(labels[start]).lower()
@@ -1155,7 +1171,7 @@ def shade_interaction_spans(
         x0 = float(start * config.data_dt)
         x1 = min(float(end * config.data_dt), duration_sec)
         if x0 < duration_sec:
-            ax.axvspan(x0, x1, color=colors.get(label, "#F3F4F6"), alpha=0.55, linewidth=0)
+            ax.axvspan(x0, x1, color=state_span_color(label), alpha=0.55, linewidth=0)
         start = end
 
 
@@ -1209,12 +1225,12 @@ def plot_interaction_aware_collision_diagnosis(
     )
 
     ref_path = np.asarray(path_data["path"], dtype=np.float32)
-    ax_path.plot(ref_path[:, 0], ref_path[:, 1], "--", color="#111827", linewidth=1.0, label="reference")
+    ax_path.plot(ref_path[:, 0], ref_path[:, 1], "--", color=REFERENCE_COLOR, linewidth=1.0, label="reference")
     for seg_idx, seg in enumerate(segments):
         ax_path.plot(
             [seg[0], seg[2]],
             [seg[1], seg[3]],
-            color="#9CA3AF",
+            color=WALL_COLOR,
             linewidth=1.0,
             label="corridor wall" if seg_idx == 0 else None,
         )
@@ -1224,21 +1240,21 @@ def plot_interaction_aware_collision_diagnosis(
             plt.Circle(
                 obs[:2],
                 obs[2],
-                facecolor="#FCA5A5" if is_hit else "#D6D3D1",
-                edgecolor="#DC2626" if is_hit else "#A8A29E",
+                facecolor=OBSTACLE_HIT_FACE_COLOR if is_hit else OBSTACLE_FACE_COLOR,
+                edgecolor=OBSTACLE_HIT_EDGE_COLOR if is_hit else OBSTACLE_EDGE_COLOR,
                 linewidth=1.5 if is_hit else 0.8,
                 alpha=0.60 if is_hit else 0.35,
                 label="hit obstacle" if is_hit else ("circle obstacle" if obs_idx == 0 else None),
             )
         )
-    ax_path.plot(robot_path[:, 0], robot_path[:, 1], color="#111827", linewidth=1.5, label="robot path")
+    ax_path.plot(robot_path[:, 0], robot_path[:, 1], color=ROBOT_COLOR, linewidth=1.5, label="robot path")
     plot_labeled_human_path(ax_path, human_path, labels, diagnosis_config)
     ax_path.scatter(
         [human_path[hit_path_idx, 0]],
         [human_path[hit_path_idx, 1]],
         marker="x",
         s=120,
-        color="#DC2626",
+        color=COLLISION_COLOR,
         linewidths=2.5,
         label="human collision",
         zorder=10,
@@ -1248,7 +1264,7 @@ def plot_interaction_aware_collision_diagnosis(
             human_path[hit_path_idx],
             diagnosis_config.human_radius,
             fill=False,
-            edgecolor="#DC2626",
+            edgecolor=COLLISION_COLOR,
             linestyle="--",
             linewidth=1.3,
         )
@@ -1268,22 +1284,22 @@ def plot_interaction_aware_collision_diagnosis(
     ax_path.set_aspect("equal", adjustable="box")
     ax_path.set_xlabel("x [m]")
     ax_path.set_ylabel("y [m]")
-    ax_path.grid(True, color="#E5E7EB", linewidth=0.8)
+    ax_path.grid(True, color=GRID_COLOR, linewidth=0.8)
     ax_path.legend(frameon=False, fontsize=8, loc="best")
 
     shade_interaction_spans(ax_clearance, labels, diagnosis_config, float(time[-1]))
-    ax_clearance.plot(time, clearance, color="#991B1B", linewidth=2.0, label="human clearance to hit obstacle")
-    ax_clearance.axhline(0.0, color="#111827", linewidth=1.0, label="physical collision boundary")
+    ax_clearance.plot(time, clearance, color=algorithm_color("raw_policy"), linewidth=2.0, label="human clearance to hit obstacle")
+    ax_clearance.axhline(0.0, color=REFERENCE_COLOR, linewidth=1.0, label="physical collision boundary")
     ax_clearance.axhline(
         diagnosis_config.safety_margin,
-        color="#DC2626",
+        color=WARNING_COLOR,
         linestyle="--",
         linewidth=1.1,
         label="old safety margin 0.04 m",
     )
     ax_clearance.axhline(
         config.safety_margin,
-        color="#16A34A",
+        color=MARGIN_COLOR,
         linestyle="--",
         linewidth=1.1,
         label=f"current safety margin {config.safety_margin:.2f} m",
@@ -1293,16 +1309,16 @@ def plot_interaction_aware_collision_diagnosis(
         if abs(int(transition_idx) - hit_action_idx) < 18:
             ax_clearance.axvline(
                 float(transition_idx * diagnosis_config.data_dt),
-                color="#6B7280",
+                color=DEFAULT_LINE_COLOR,
                 linestyle=":",
                 linewidth=1.0,
             )
-    ax_clearance.axvline(float(hit["time_sec"]), color="#DC2626", linewidth=1.4, label="collision time")
+    ax_clearance.axvline(float(hit["time_sec"]), color=COLLISION_COLOR, linewidth=1.4, label="collision time")
     ax_clearance.set_xlim(max(0.0, float(hit["time_sec"]) - 4.5), float(hit["time_sec"]) + 0.8)
     ax_clearance.set_ylim(min(-0.05, float(np.min(clearance[local_start:local_end])) - 0.02), 0.35)
     ax_clearance.set_xlabel("time [s]")
     ax_clearance.set_ylabel("clearance [m]")
-    ax_clearance.grid(True, color="#E5E7EB", linewidth=0.8)
+    ax_clearance.grid(True, color=GRID_COLOR, linewidth=0.8)
     ax_clearance.legend(frameon=False, fontsize=8, loc="upper right")
 
     output_path.parent.mkdir(parents=True, exist_ok=True)

@@ -27,6 +27,15 @@ from src.compliance_control import (  # noqa: E402
 )
 from src.physics import PhysicsEngine  # noqa: E402
 from src.safety_filter import QPSafetyFilter  # noqa: E402
+from tests.plot_styles import (  # noqa: E402
+    GOAL_COLOR,
+    GRID_COLOR,
+    HUMAN_COLOR,
+    ROBOT_COLOR,
+    STATE_COLORS,
+    algorithm_color,
+    state_span_color,
+)
 
 
 SEGMENTATION_PATH = Path(
@@ -305,13 +314,11 @@ def plot_interaction_aware_demo(
     segmentation_path: Path,
     progress_action_path: Path,
 ) -> None:
-    label_colors = {"guide": "#2563EB", "leash": "#DC2626", "unknown": "#9CA3AF"}
-
     fig, ax = plt.subplots(figsize=(10.8, 2.2))
     ax.plot(
         labeled["robot_x"].to_numpy(dtype=float) / 1000.0,
         labeled["robot_y"].to_numpy(dtype=float) / 1000.0,
-        color="#111827",
+        color=ROBOT_COLOR,
         linewidth=1.1,
         alpha=0.36,
         label="robot mocap",
@@ -321,7 +328,7 @@ def plot_interaction_aware_demo(
     ax.plot(
         human_x,
         human_y,
-        color="#6B7280",
+        color=HUMAN_COLOR,
         linewidth=1.1,
         alpha=0.36,
         label="human mocap",
@@ -333,7 +340,7 @@ def plot_interaction_aware_demo(
             human_x[mask],
             human_y[mask],
             s=9,
-            color=label_colors[label],
+            color=STATE_COLORS[label],
             alpha=0.76,
             label="tether" if label == "leash" else "guide",
         )
@@ -341,7 +348,7 @@ def plot_interaction_aware_demo(
     ax.set_ylabel("mocap y [m]")
     ax.set_aspect("5", adjustable="box")
     ax.set_ylim(-.08, .08)
-    ax.grid(True, color="#E5E7EB", linewidth=0.8)
+    ax.grid(True, color=GRID_COLOR, linewidth=0.8)
     ax.legend(
         frameon=False,
         fontsize=8,
@@ -364,9 +371,9 @@ def plot_interaction_aware_demo(
 
     ax = axes[0]
     for mode, color, label in (
-        ("raw_policy", "#7F1D1D", "raw"),
-        ("full_time_compliance", "#581C87", "full-time compliance"),
-        ("interaction_aware", "#1D4ED8", "interaction-aware"),
+        ("raw_policy", algorithm_color("raw_policy"), "raw"),
+        ("full_time_compliance", algorithm_color("full_time_compliance"), "full-time compliance"),
+        ("interaction_aware", algorithm_color("interaction_aware"), "interaction-aware"),
     ):
         robot_path = rollouts[mode]["robot_path"]
         time_axis = np.arange(len(robot_path), dtype=float) * config.sim_dt
@@ -380,9 +387,9 @@ def plot_interaction_aware_demo(
         finish = summary["modes"][mode]["completion_time_sec"]
         if finish is not None:
             ax.axvline(float(finish), color=color, linestyle=":", linewidth=1.2)
-    ax.axhline(scenario.goal_x, color="#111827", linestyle="--", linewidth=1.0, label="goal")
+    ax.axhline(scenario.goal_x, color=GOAL_COLOR, linestyle="--", linewidth=1.0, label="goal")
     ax.set_ylabel("robot x [m]")
-    ax.grid(True, color="#E5E7EB", linewidth=0.8)
+    ax.grid(True, color=GRID_COLOR, linewidth=0.8)
     ax.legend(frameon=False, fontsize=8)
 
     ax = axes[1]
@@ -393,7 +400,7 @@ def plot_interaction_aware_demo(
             ax.axvspan(
                 float(start) * config.data_dt,
                 float(end) * config.data_dt,
-                color="#FCA5A5",
+                color=state_span_color("leash"),
                 alpha=0.24,
                 linewidth=0,
                 label="tether interval" if not tether_span_labeled else None,
@@ -402,28 +409,28 @@ def plot_interaction_aware_demo(
     ax.plot(
         action_time,
         smooth_forward_delta(actions["raw_policy"][:, 0]),
-        color="#7F1D1D",
+        color=algorithm_color("raw_policy"),
         linewidth=1.8,
         label="raw",
     )
     ax.plot(
         action_time,
         smooth_forward_delta(actions["full_time_compliance"][:, 0]),
-        color="#581C87",
+        color=algorithm_color("full_time_compliance"),
         linewidth=1.8,
         label="full-time",
     )
     ax.plot(
         action_time,
         smooth_forward_delta(actions["interaction_aware"][:, 0]),
-        color="#1D4ED8",
+        color=algorithm_color("interaction_aware"),
         linewidth=1.8,
         label="interaction-aware",
     )
     ax.set_xlim(0.0, float(scenario.frame_count) * config.data_dt)
     ax.set_xlabel("time [s]")
     ax.set_ylabel("forward delta [m]")
-    ax.grid(True, color="#E5E7EB", linewidth=0.8)
+    ax.grid(True, color=GRID_COLOR, linewidth=0.8)
     ax.legend(frameon=False, fontsize=8)
 
     progress_action_path.parent.mkdir(parents=True, exist_ok=True)

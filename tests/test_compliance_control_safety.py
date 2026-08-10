@@ -24,6 +24,18 @@ from src.compliance_control import (  # noqa: E402
 )
 from src.physics import PhysicsEngine  # noqa: E402
 from src.safety_filter import QPSafetyFilter  # noqa: E402
+from tests.plot_styles import (  # noqa: E402
+    COLLISION_COLOR,
+    GRID_COLOR,
+    HUMAN_COLOR,
+    OBSTACLE_EDGE_COLOR,
+    PANEL_FACE_COLOR,
+    REFERENCE_COLOR,
+    ROBOT_COLOR,
+    SAFETY_PROJECTION_COLOR,
+    SAFETY_RING_COLOR,
+    SPINE_COLOR,
+)
 
 
 ARTIFACT_DIR = Path(__file__).resolve().parent / "artifacts" / "compliance_control"
@@ -231,17 +243,12 @@ def plot_compliance_scenario(
         ("compliance_no_safety", "Compliance Only"),
         ("compliance_safe", "Compliance + Safety"),
     ]
-    colors = {
-        "raw_policy": ("#7F1D1D", "#B45309"),
-        "compliance_no_safety": ("#581C87", "#0F766E"),
-        "compliance_safe": ("#1D4ED8", "#047857"),
-    }
     for ax, (mode, _title) in zip(axes, panels):
-        ax.set_facecolor("#F8FAFC")
+        ax.set_facecolor(PANEL_FACE_COLOR)
         ax.plot(
             scenario.reference_path[:, 0],
             scenario.reference_path[:, 1],
-            color="#6B7280",
+            color=REFERENCE_COLOR,
             linewidth=1.2,
             linestyle="--",
             label="reference",
@@ -252,7 +259,7 @@ def plot_compliance_scenario(
                 plt.Circle(
                     obs[:2],
                     obs[2],
-                    color="#7C2D12",
+                    color=OBSTACLE_EDGE_COLOR,
                     alpha=0.30,
                     label="obstacle" if obs_idx == 0 else None,
                     zorder=1,
@@ -264,7 +271,7 @@ def plot_compliance_scenario(
                     obs[2] + scenario.robot_radius,
                     fill=False,
                     linestyle=":",
-                    color="#9CA3AF",
+                    color=SAFETY_RING_COLOR,
                     linewidth=1.2,
                     label="robot collision radius" if obs_idx == 0 else None,
                     zorder=1,
@@ -273,11 +280,10 @@ def plot_compliance_scenario(
         result = rollouts[mode]
         robot_path = result["robot_path"]
         human_path = result["human_path"]
-        robot_color, human_color = colors[mode]
         ax.plot(
             robot_path[:, 0],
             robot_path[:, 1],
-            color=robot_color,
+            color=ROBOT_COLOR,
             linewidth=2.2,
             label="robot",
             zorder=4,
@@ -285,7 +291,7 @@ def plot_compliance_scenario(
         ax.plot(
             human_path[:, 0],
             human_path[:, 1],
-            color=human_color,
+            color=HUMAN_COLOR,
             linewidth=2.2,
             label="human",
             zorder=4,
@@ -294,7 +300,7 @@ def plot_compliance_scenario(
             [robot_path[0, 0]],
             [robot_path[0, 1]],
             s=80,
-            c=robot_color,
+            c=ROBOT_COLOR,
             edgecolors="white",
             linewidths=1.0,
             zorder=5,
@@ -303,7 +309,7 @@ def plot_compliance_scenario(
             [human_path[0, 0]],
             [human_path[0, 1]],
             s=80,
-            c=human_color,
+            c=HUMAN_COLOR,
             edgecolors="white",
             linewidths=1.0,
             zorder=5,
@@ -315,7 +321,7 @@ def plot_compliance_scenario(
                 [hit_pos[0]],
                 [hit_pos[1]],
                 s=110,
-                c="#DC2626",
+                c=COLLISION_COLOR,
                 marker="x",
                 linewidths=2.4,
                 label="first collision",
@@ -333,7 +339,7 @@ def plot_compliance_scenario(
                 projected_points[:, 0],
                 projected_points[:, 1],
                 s=42,
-                c="#111827",
+                c=SAFETY_PROJECTION_COLOR,
                 marker="D",
                 label="safety projection",
                 zorder=6,
@@ -353,12 +359,12 @@ def plot_compliance_scenario(
             ha="left",
             va="top",
             fontsize=9,
-            bbox={"facecolor": "white", "edgecolor": "#D1D5DB", "alpha": 0.92},
+            bbox={"facecolor": "white", "edgecolor": SPINE_COLOR, "alpha": 0.92},
         )
         ax.set_aspect("equal", adjustable="box")
         ax.set_xlim(-1.0, 1.45)
         ax.set_ylim(-0.75, 1.05)
-        ax.grid(True, color="#E5E7EB", linewidth=0.8)
+        ax.grid(True, color=GRID_COLOR, linewidth=0.8)
         ax.set_xlabel("x [m]")
         ax.set_ylabel("y [m]")
 

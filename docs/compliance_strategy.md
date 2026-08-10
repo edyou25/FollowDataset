@@ -160,4 +160,4 @@ $$
 \delta_t = \alpha^\star \delta_t^0 .
 $$
 
-需要注意，policy 只在纯拖动数据上训练，tether 状态对 policy 是 out-of-distribution，因此不进行策略生成，而是沿用上一帧stash的action。
+需要注意，policy 只在纯拖动数据上训练，tether 状态对 policy 是 out-of-distribution，因此沿用上一帧stash的action。
